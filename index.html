@@ -40,7 +40,8 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
  *      ① 目がカメラを即座に見る（eyeSmoothing: 速い）
  *      ② headDelaySec 秒遅れて、頭が「その時点のカメラ位置」へ動き出す
  *      ③ 頭の回転が headOnlyDeg を超えた分は、首が回して分担する
- *      ④ 頭＋首の合計は maxAngleDeg まで。それ以上は目だけが追う
+ *      ④ 頭＋首は左右 maxYawDeg・上下 maxPitchDeg まで。それ以上は目だけが追う
+ *         （上下左右は「頭の正面・上・右」の3軸に分けて別々に制限する）
  *  - 骨の操作: RealityKitなら ModelEntity.jointTransforms、
  *    SceneKitなら SCNNode の orientation を、アニメ再生後に上書きする。
  *  - 毎フレームの順序: 補正を戻す → アニメ更新 → 補正前の姿勢を保存
@@ -56,7 +57,8 @@ const SETTINGS = {
     fallbackToFirstClip: true,                       // 無ければ最初のクリップ
   },
   gaze: {
-    maxAngleDeg: 15,       // 頭＋首の合計の上限
+    maxYawDeg: 15,         // 頭＋首の左右の上限
+    maxPitchDeg: 30,       // 頭＋首の上下の上限（左右より広い）
     headOnlyDeg: 10,       // 頭だけで回す範囲。超えた分を首が回す
     headDelaySec: 0.25,    // 目が見てから、頭が動き出すまでの遅れ
     headSmoothing: 6,      // 頭の追従の速さ（大きいほど速い）
@@ -122,7 +124,8 @@ function makeEntry(bone) {
   // 初期姿勢で「正面」がボーンのローカルのどの軸かを求める
   const restQ = bone.getWorldQuaternion(new THREE.Quaternion());
   const axis = new THREE.Vector3(...G.forwardWorldAtRest).normalize().applyQuaternion(restQ.invert());
-  return { bone, axis, saved: bone.quaternion.clone(), q: new THREE.Quaternion() };
+  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(restQ);   // restQは反転済みなので「ローカルの上」
+  return { bone, axis, up, saved: bone.quaternion.clone(), q: new THREE.Quaternion() };
 }
 const allEntries = () => [rig.neck, rig.head, ...rig.eyes].filter(Boolean);
 
@@ -206,8 +209,21 @@ function applyGaze(dt, now) {
   head.bone.getWorldPosition(_p);
   _f.copy(head.axis).applyQuaternion(headOrig).normalize();
   _t.copy(delayedCameraPos(now, G.headDelaySec, _dp)).sub(_p).normalize();
-  const ang = limitedRotation(_f, _t, G.maxAngleDeg * DEG, _lim);
-  stat.clamped = ang > G.maxAngleDeg * DEG;
+  // 正面(_f)・上(_u)・右(_r)の3軸に分け、左右と上下を別々に制限する
+  const _u = head.up.clone().applyQuaternion(headOrig).normalize();
+  const _r = new THREE.Vector3().crossVectors(_u, _f).normalize();
+  const tf = _t.dot(_f), tu = _t.dot(_u), tr = _t.dot(_r);
+  const yaw = Math.atan2(tr, tf);
+  const pitch = Math.atan2(tu, Math.hypot(tf, tr));
+  const yawC = THREE.MathUtils.clamp(yaw, -G.maxYawDeg * DEG, G.maxYawDeg * DEG);
+  const pitchC = THREE.MathUtils.clamp(pitch, -G.maxPitchDeg * DEG, G.maxPitchDeg * DEG);
+  stat.clamped = yawC !== yaw || pitchC !== pitch;
+  const cp = Math.cos(pitchC);
+  _t.copy(_f).multiplyScalar(cp * Math.cos(yawC))
+    .addScaledVector(_r, cp * Math.sin(yawC))
+    .addScaledVector(_u, Math.sin(pitchC));
+  _q.setFromUnitVectors(_f, _t);
+  _lim.copy(_q);
   headQ.slerp(_lim, 1 - Math.exp(-G.headSmoothing * dt));
 
   // 合計角のうち headOnlyDeg を超えた分を首が担当
@@ -254,7 +270,7 @@ renderer.setAnimationLoop(() => {
     hud.textContent =
       `クリップ: ${info.clip}\n` +
       `目: ${stat.eyeDeg.toFixed(1)}° / 頭: ${headDeg.toFixed(1)}° / 首: ${neckDeg.toFixed(1)}°` +
-      (stat.clamped ? `（頭＋首が上限${G.maxAngleDeg}°で制限中）` : "") + "\n" +
+      (stat.clamped ? `（頭＋首が上限で制限中：左右${G.maxYawDeg}°・上下${G.maxPitchDeg}°）` : "") + "\n" +
       `使用ボーン: 首=${rig.neck ? rig.neck.bone.name : "なし"} 頭=${rig.head.bone.name} 目=${rig.eyes.length}個`;
   } else if (info.bones.length) {
     hud.textContent = "頭ボーンが見つかりません。下の骨名一覧を見て SETTINGS.gaze.bones を直してください。";
@@ -267,7 +283,7 @@ function buildSpecText() {
     "\n\n【検出結果】\nクリップ: " + (info.clips.join(", ") || "なし（glbにアニメーション無し）") +
     "\n使用ボーン: " + allEntries().map(e => e.bone.name).join(", ") +
     "\n骨名一覧: " + (info.bones.join(", ") || "なし") +
-    "\n\n【動きの順序】目が見る → headDelaySec後に頭 → headOnlyDeg超過分は首 → 合計maxAngleDegまで" +
+    "\n\n【動きの順序】目が見る → headDelaySec後に頭 → headOnlyDeg超過分は首 → 左右maxYawDeg・上下maxPitchDegまで" +
     "\n【Swift側の対応】カメラ=ARFrame.camera.transform / 骨=jointTransforms or SCNNode";
 }
 </script>
