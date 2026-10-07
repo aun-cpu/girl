@@ -1,525 +1,472 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
-<title>girl AR (iOS対応)</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>girl.glb AR</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; overscroll-behavior: none; }
-  #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  #video { position: fixed; left: 0; top: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-  #info {
-    position: fixed; top: env(safe-area-inset-top, 0); left: 0; right: 0; z-index: 2;
-    padding: 8px 12px; color: #fff; font: 13px sans-serif; text-align: center;
-    text-shadow: 0 0 4px #000; pointer-events: none;
-  }
-  #bar {
-    position: fixed; left: 0; right: 0; z-index: 3;
-    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
-    display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; padding: 0 8px;
-  }
-  button {
-    padding: 12px 16px; font-size: 14px; font-weight: bold;
-    border: 0; border-radius: 999px; background: rgba(255,255,255,.92); color: #111;
-  }
-  button:disabled { opacity: .5; }
-  #exit {
-    display: none; position: fixed; top: calc(8px + env(safe-area-inset-top, 0px)); left: 50%;
-    transform: translateX(-50%); z-index: 4; padding: 6px 14px; font-size: 12px; opacity: .6;
-  }
-  body.stereo #info, body.stereo #bar { display: none; }
-  body.stereo #exit { display: block; }
+  html,body{margin:0;height:100%;overflow:hidden;background:#000;color:#fff;
+    font:14px/1.4 -apple-system,"Hiragino Sans",sans-serif;touch-action:none;
+    -webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+  #vids{position:fixed;inset:0;display:flex}
+  #vids video{flex:1;min-width:0;height:100%;object-fit:cover;background:#111}
+  #v2{display:none}
+  body.stereo #v2{display:block}
+  #cv{position:fixed;inset:0;width:100%;height:100%;display:block}
+
+  #bar{position:fixed;left:0;right:0;top:0;padding:calc(env(safe-area-inset-top) + 6px) 8px 6px;
+    display:flex;flex-wrap:wrap;gap:6px;z-index:5}
+  button{font:inherit;color:#fff;background:rgba(20,20,24,.72);border:1px solid rgba(255,255,255,.28);
+    border-radius:8px;padding:7px 10px;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+  button.on{background:rgba(40,120,255,.75);border-color:rgba(160,200,255,.8)}
+  button:active{opacity:.7}
+
+  #panel{position:fixed;left:8px;right:8px;bottom:calc(env(safe-area-inset-bottom) + 8px);
+    max-height:42%;overflow:auto;background:rgba(15,15,18,.78);border-radius:12px;padding:10px;z-index:5;
+    -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);touch-action:pan-y}
+  #panel.hidden{display:none}
+  #panel h4{margin:8px 0 6px;font-size:13px;font-weight:600;opacity:.8}
+  #panel h4:first-child{margin-top:0}
+  .row{display:flex;flex-wrap:wrap;gap:6px}
+  .m{display:flex;align-items:center;gap:8px;margin:4px 0}
+  .m span{width:42%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+  .m input{flex:1}
+  #filter{width:100%;box-sizing:border-box;padding:7px;border-radius:8px;border:1px solid #555;
+    background:#222;color:#fff;font-size:16px}
+  #status{font-size:11px;opacity:.75;white-space:pre-wrap;margin-top:8px}
+
+  #start{position:fixed;inset:0;z-index:20;background:#0b0d12;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px}
+  #start button{font-size:18px;padding:14px 28px;background:#2b6cff;border-color:#2b6cff}
+  #start p{margin:0;max-width:22em;opacity:.8}
+  #err{color:#ff8a8a;white-space:pre-wrap;font-size:12px;max-width:26em}
 </style>
-<script type="importmap">
-{
-  "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.167.1/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.167.1/examples/jsm/"
-  }
-}
-</script>
-<!-- マーカー検出(ArUco)ライブラリ -->
-<script src="https://cdn.jsdelivr.net/npm/js-aruco2@2.0.0/src/cv.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/js-aruco2@2.0.0/src/aruco.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/js-aruco2@2.0.0/src/svd.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/js-aruco2@2.0.0/src/posit1.js"></script>
 </head>
 <body>
-<video id="video" playsinline muted autoplay></video>
-<canvas id="view"></canvas>
-<div id="info">「開始」を押して、カメラと動きセンサーを許可してください</div>
-<div id="bar">
-  <button id="btnMain">開始</button>
-  <button id="btnMode" disabled>モード: ジャイロ</button>
-  <button id="btnStereo" disabled>ゴーグル</button>
-  <button id="btnSound" disabled>音</button>
+<div id="vids"><video id="v1" playsinline muted autoplay></video><video id="v2" playsinline muted autoplay></video></div>
+<canvas id="cv"></canvas>
+
+<div id="bar" style="display:none">
+  <button id="bPlace">前に配置</button>
+  <button id="bGyro" class="on">ジャイロ</button>
+  <button id="bEye" class="on">目線</button>
+  <button id="bStereo">2画面</button>
+  <button id="bPanel">操作</button>
 </div>
-<button id="exit">2画面を終了</button>
+
+<div id="panel" class="hidden">
+  <h4>アニメーション</h4>
+  <div class="row" id="clips"></div>
+  <h4>シェイプキー</h4>
+  <input id="filter" placeholder="名前で絞り込み">
+  <div id="morphs"></div>
+  <div id="status"></div>
+</div>
+
+<div id="start">
+  <p>girl.glb をカメラ映像に重ねて表示します。<br>1本指: 移動 / 2本指: 拡大縮小・回転</p>
+  <button id="goBtn">開始</button>
+  <div id="err"></div>
+</div>
+
+<script type="importmap">
+{"imports":{
+  "three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+}}
+</script>
 
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { ImageSegmenter, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
 
-// ================= 調整用 =================
-const MODEL_URL       = 'girl.glb';
-const SOUND_URL       = 'sound.mp3';  // 無ければ内蔵のピコ音を使う
-const CAMERA_FOV_LONG = 64;    // カメラ映像の長辺方向の画角(度)。ズレるなら調整
-const GYRO_DISTANCE   = 2.0;   // ジャイロモード: モデルまでの距離(m)
-const CAMERA_HEIGHT   = 1.3;   // ジャイロモード: スマホの高さ(m)
-const GYRO_SCALE      = 1.0;   // ジャイロモード: モデルの大きさ
-const MARKER_SIZE     = 0.06;  // 印刷したマーカーの黒枠の一辺(m)。実寸に合わせる
-const MARKER_ID       = -1;    // -1なら最初に見つかったマーカー。特定IDだけにするなら番号
-const MARKER_SCALE    = 0.15;  // マーカーモード: モデルの大きさ
-const EYE_SEPARATION  = 0.064; // 2画面時の左右の目の間隔(m)
-const MAX_EYE_DEG     = 30;    // 目ボーンの最大回転角
-const DETECT_MAX_PX   = 640;   // マーカー検出用の縮小サイズ
-// 人物マスクで「手前」とみなすクラス(0=背景,1=髪,2=体の肌,3=顔の肌,4=服,5=その他)
-const FRONT_CLASSES = new Set([1, 2, 3, 4, 5]);
-const SEG_MODEL = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite';
-// ==========================================
+/* ================= 設定 ================= */
+const MODEL_URL   = 'girl.glb';
+const MODEL_H     = 1.6;     // 表示する身長(m)
+const START_DIST  = 2.5;     // 配置距離(m)
+const EYE_MAX_DEG = 25;      // 目の最大回転角
+const STEREO_IPD  = 0.03;    // 2画面時の左右カメラのずれ(m)
+const EYE_RE      = /(eye|目|眼)/i;
+const NOT_EYE_RE  = /(lid|brow|lash|まぶた|眉|まつ)/i;
 
-const $ = (id) => document.getElementById(id);
-const video = $('video'), view = $('view'), info = $('info');
-const btnMain = $('btnMain'), btnMode = $('btnMode'), btnStereo = $('btnStereo'), btnSound = $('btnSound');
-const ctx = view.getContext('2d');
+/* 条件ルール: on = 'tap' | 'near'
+   clip : アニメ名 / loop: true で繰り返し
+   morph: {シェイプキー名: 値} / hold: 秒後に0へ戻す
+   sound: 音声ファイルURL
+   near : dist(m) 以内に近づいたら1回発火 (離れると再武装)
+   例:
+   { on:'tap',  clip:'Wave' },
+   { on:'tap',  morph:{Smile:1}, hold:2 },
+   { on:'near', dist:1.2, clip:'Hello', sound:'hello.mp3' },
+*/
+const RULES = [
+];
 
-// ---------- three.js ----------
-const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
-renderer.setPixelRatio(1);
+/* ================= 基本セットアップ ================= */
+const $ = id => document.getElementById(id);
+const canvas = $('cv');
+const renderer = new THREE.WebGLRenderer({canvas, alpha:true, antialias:true, powerPreference:'low-power'});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setClearColor(0x000000, 0);
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(60, 1, 0.02, 50);
-scene.add(camera);
-scene.add(new THREE.HemisphereLight(0xffffff, 0x444466, 1.5));
-const dl = new THREE.DirectionalLight(0xffffff, 1.5);
-dl.position.set(1, 3, 2);
-scene.add(dl);
 
-// holder(マーカー/床の位置) > stand(上向きの調整) > model
-const holder = new THREE.Group();
-const stand = new THREE.Group();
-holder.add(stand);
-scene.add(holder);
-let model = null;
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, 1, 0.05, 50);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x667788, 1.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+sun.position.set(1, 2, 2);
+scene.add(sun);
 
-// ---------- 状態 ----------
-let started = false, mode = 'gyro', stereo = false;
-let W = 0, H = 0;
+/* anchor: 後で「頭の位置」「体の表/裏」に合わせて動かす対象。
+   今は手動操作(ドラッグ等)で位置・向き・大きさを決める。 */
+const anchor = new THREE.Group();
+scene.add(anchor);
 
-// ---------- 画面サイズ ----------
-function layout() {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const w = Math.round(window.innerWidth * dpr) & ~1;
-  const h = Math.round(window.innerHeight * dpr) & ~1;
-  if (w !== W || h !== H) { W = w; H = h; view.width = w; view.height = h; }
+let stereo = false;
+function resize(){
+  renderer.setSize(innerWidth, innerHeight, false);
 }
+addEventListener('resize', resize);
+addEventListener('orientationchange', () => setTimeout(resize, 200));
+resize();
 
-function coverRect(sw, sh, dw, dh) {
-  const s = Math.max(dw / sw, dh / sh);
-  const cw = dw / s, ch = dh / s;
-  return [(sw - cw) / 2, (sh - ch) / 2, cw, ch];
-}
-const focalVideo = () => (Math.max(video.videoWidth, video.videoHeight) / 2) /
-  Math.tan(THREE.MathUtils.degToRad(CAMERA_FOV_LONG) / 2);
-
-// ---------- ジャイロ ----------
-const deviceQuat = new THREE.Quaternion();
-let hasOrientation = false;
-{
-  const eul = new THREE.Euler(), q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
-  const zee = new THREE.Vector3(0, 0, 1), q0 = new THREE.Quaternion();
-  window.addEventListener('deviceorientation', (e) => {
-    if (e.alpha == null) return;
-    hasOrientation = true;
-    const o = THREE.MathUtils.degToRad((screen.orientation && screen.orientation.angle) || window.orientation || 0);
-    eul.set(THREE.MathUtils.degToRad(e.beta), THREE.MathUtils.degToRad(e.alpha), -THREE.MathUtils.degToRad(e.gamma), 'YXZ');
-    deviceQuat.setFromEuler(eul);
-    deviceQuat.multiply(q1);
-    deviceQuat.multiply(q0.setFromAxisAngle(zee, -o));
-  });
-}
-
-// ---------- モデル配置 ----------
-function placeGyro() {
-  if (!model) return;
-  const f = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-  f.y = 0;
-  if (f.lengthSq() < 1e-4) f.set(0, 0, -1);
-  f.normalize().multiplyScalar(GYRO_DISTANCE);
-  holder.position.set(f.x, -CAMERA_HEIGHT, f.z);
-  holder.quaternion.identity();
-  stand.rotation.set(0, 0, 0);
-  model.position.set(0, 0, 0);
-  model.rotation.set(0, Math.atan2(-f.x, -f.z), 0); // カメラの方を向く
-  model.scale.setScalar(GYRO_SCALE);
-}
-function placeMarker() {
-  if (!model) return;
-  stand.rotation.set(Math.PI / 2, 0, 0); // モデルの上方向 = マーカーの法線
-  model.position.set(0, 0, 0);
-  model.rotation.set(0, 0, 0);
-  model.scale.setScalar(MARKER_SCALE);
-}
-function setMode(m) {
-  mode = m;
-  btnMode.textContent = 'モード: ' + (m === 'gyro' ? 'ジャイロ' : 'マーカー');
-  if (m === 'gyro') { placeGyro(); info.textContent = 'ドラッグで移動 / 2本指で拡大・回転 / タップで音'; }
-  else {
-    placeMarker();
-    markerVisible = false; markerEver = false;
-    info.textContent = initDetector() ? 'マーカーをカメラに映してください' : 'マーカーライブラリを読み込めませんでした';
-  }
-}
-
-// ---------- 目線をカメラへ ----------
-const eyes = [];
-const MAX_EYE = THREE.MathUtils.degToRad(MAX_EYE_DEG);
-const _m = new THREE.Matrix4(), _cam = new THREE.Vector3(), _dir = new THREE.Vector3(), _fwd = new THREE.Vector3();
-const _full = new THREE.Quaternion(), _q = new THREE.Quaternion(), _id = new THREE.Quaternion();
-
-function findEyes() {
-  eyes.length = 0;
-  model.traverse((o) => {
-    if (o.isMesh || !o.parent) return;
-    const n = o.name || '';
-    // 「目.L」「目.R」(three.jsでは「目L」「目R」)、Eye_L などを拾う
-    if (/目|eye/i.test(n) && !/brow|lid|lash|眉|まぶた|瞼|白目/i.test(n)) {
-      eyes.push({ bone: o, rest: o.quaternion.clone() });
-    }
-  });
-  console.log('eye bones:', eyes.map((e) => e.bone.name));
-}
-function updateEyes() {
-  if (!eyes.length) return;
-  _cam.setFromMatrixPosition(camera.matrixWorld);
-  for (const { bone, rest } of eyes) {
-    _m.copy(bone.parent.matrixWorld).invert();
-    _dir.copy(_cam).applyMatrix4(_m).sub(bone.position).normalize();
-    _fwd.set(0, 0, 1).applyQuaternion(rest);
-    _full.setFromUnitVectors(_fwd, _dir);
-    const angle = _fwd.angleTo(_dir);
-    const t = angle > MAX_EYE ? MAX_EYE / angle : 1;
-    _q.copy(_id).slerp(_full, t).multiply(rest);
-    bone.quaternion.copy(_q);
-  }
-}
-
-// ---------- 人物マスク(手などを手前に) ----------
-let segmenter = null, hasMask = false, maskImage = null;
-const maskCanvas = document.createElement('canvas');
-const maskCtx = maskCanvas.getContext('2d');
-const personCanvas = document.createElement('canvas');
-const pctx = personCanvas.getContext('2d');
-
-async function initSegmenter() {
-  const fileset = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
-  const make = (delegate) => ImageSegmenter.createFromOptions(fileset, {
-    baseOptions: { modelAssetPath: SEG_MODEL, delegate },
-    runningMode: 'VIDEO', outputCategoryMask: true, outputConfidenceMasks: false
-  });
-  try { segmenter = await make('GPU'); }
-  catch (e) { console.warn('GPU失敗、CPUで再試行', e); segmenter = await make('CPU'); }
-}
-function onSegment(result) {
-  const mask = result.categoryMask;
-  if (!mask) return;
-  const w = mask.width, h = mask.height, m = mask.getAsUint8Array();
-  if (!maskImage || maskImage.width !== w || maskImage.height !== h) {
-    maskCanvas.width = w; maskCanvas.height = h;
-    maskImage = maskCtx.createImageData(w, h);
-  }
-  const d = maskImage.data;
-  for (let i = 0, n = w * h; i < n; i++) d[i * 4 + 3] = FRONT_CLASSES.has(m[i]) ? 255 : 0;
-  maskCtx.putImageData(maskImage, 0, 0);
-  hasMask = true;
-}
-function buildPerson() {
-  const vw = video.videoWidth, vh = video.videoHeight;
-  if (personCanvas.width !== vw || personCanvas.height !== vh) { personCanvas.width = vw; personCanvas.height = vh; }
-  pctx.globalCompositeOperation = 'source-over';
-  pctx.clearRect(0, 0, vw, vh);
-  pctx.drawImage(video, 0, 0, vw, vh);
-  pctx.globalCompositeOperation = 'destination-in';
-  pctx.drawImage(maskCanvas, 0, 0, vw, vh);
-  pctx.globalCompositeOperation = 'source-over';
-}
-
-// ---------- マーカー追従 ----------
-let detector = null, posit = null, positKey = '';
-let markerVisible = false, markerEver = false, lostFrames = 0, lastMarkerSound = 0;
-const detCanvas = document.createElement('canvas');
-const detCtx = detCanvas.getContext('2d', { willReadFrequently: true });
-const M3 = new THREE.Matrix4(), Mw = new THREE.Matrix4();
-const tPos = new THREE.Vector3(), tQuat = new THREE.Quaternion(), tScl = new THREE.Vector3();
-
-function initDetector() {
-  if (detector) return true;
-  if (typeof AR === 'undefined' || typeof POS === 'undefined') return false;
-  detector = new AR.Detector({ dictionaryName: 'ARUCO' });
-  return true;
-}
-function detectMarker() {
-  const vw = video.videoWidth, vh = video.videoHeight;
-  const k = Math.min(1, DETECT_MAX_PX / Math.max(vw, vh));
-  const dw = Math.round(vw * k), dh = Math.round(vh * k);
-  if (detCanvas.width !== dw || detCanvas.height !== dh) { detCanvas.width = dw; detCanvas.height = dh; }
-  detCtx.drawImage(video, 0, 0, dw, dh);
-  let markers = [];
-  try { markers = detector.detect(detCtx.getImageData(0, 0, dw, dh)); } catch (e) { console.error(e); }
-  const mk = markers.find((x) => MARKER_ID < 0 || x.id === MARKER_ID);
-  if (!mk) { if (++lostFrames > 6) markerVisible = false; return; }
-  lostFrames = 0;
-
-  const key = dw + 'x' + dh;
-  if (!posit || positKey !== key) {
-    const f = (Math.max(dw, dh) / 2) / Math.tan(THREE.MathUtils.degToRad(CAMERA_FOV_LONG) / 2);
-    posit = new POS.Posit(MARKER_SIZE, f);
-    positKey = key;
-  }
-  const corners = mk.corners.map((c) => ({ x: c.x - dw / 2, y: dh / 2 - c.y }));
-  const pose = posit.pose(corners);
-  const R = pose.bestRotation, t = pose.bestTranslation;
-
-  // POSITの座標(奥がz+)から、three.jsのカメラ座標(奥がz-)へ
-  const c = [1, 1, -1];
-  const R3 = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
-  const t3 = [t[0], t[1], -t[2]];
-  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) R3[i][j] = c[i] * c[j] * R[i][j];
-  // マーカーの法線がカメラ側を向くようにそろえる
-  const dot = R3[0][2] * -t3[0] + R3[1][2] * -t3[1] + R3[2][2] * -t3[2];
-  if (dot < 0) for (let i = 0; i < 3; i++) { R3[i][1] *= -1; R3[i][2] *= -1; }
-  M3.set(
-    R3[0][0], R3[0][1], R3[0][2], t3[0],
-    R3[1][0], R3[1][1], R3[1][2], t3[1],
-    R3[2][0], R3[2][1], R3[2][2], t3[2],
-    0, 0, 0, 1
-  );
-  Mw.multiplyMatrices(camera.matrixWorld, M3);
-  Mw.decompose(tPos, tQuat, tScl);
-
-  if (!markerVisible) {
-    holder.position.copy(tPos);
-    holder.quaternion.copy(tQuat);
-    const now = performance.now();
-    if (now - lastMarkerSound > 3000) { lastMarkerSound = now; playSound(); }
-  } else {
-    holder.position.lerp(tPos, 0.5);
-    holder.quaternion.slerp(tQuat, 0.5);
-  }
-  markerVisible = true;
-  if (!markerEver) { markerEver = true; info.textContent = 'マーカーに追従中 / ドラッグで位置調整'; }
-}
-
-// ---------- サウンド ----------
-let listener = null, sound = null;
-function initAudio() {
-  if (listener) return;
-  listener = new THREE.AudioListener();
-  camera.add(listener);
-  sound = new THREE.PositionalAudio(listener);
-  sound.setRefDistance(1);
-  const synth = () => {
-    const ac = listener.context, sr = ac.sampleRate;
-    const buf = ac.createBuffer(1, Math.floor(sr * 0.5), sr);
-    const d = buf.getChannelData(0);
-    for (let i = 0; i < d.length; i++) {
-      const t = i / sr;
-      d[i] = Math.sin(2 * Math.PI * (660 + 440 * t) * t) * Math.exp(-6 * t) * 0.6;
-    }
-    sound.setBuffer(buf);
-  };
-  new THREE.AudioLoader().load(SOUND_URL, (b) => sound.setBuffer(b), undefined, synth);
-  listener.context.resume();
-}
-function playSound() {
-  if (!sound || !sound.buffer) return;
-  if (listener.context.state !== 'running') listener.context.resume();
-  if (sound.isPlaying) sound.stop();
-  sound.play();
-}
-
-// ---------- 操作(ドラッグ移動・2本指で拡大回転・タップで音) ----------
-const raycaster = new THREE.Raycaster();
-const plane = new THREE.Plane();
-const pts = new Map();
-let dragging = false, grab = new THREE.Vector2(), tapInfo = null, pinchPrev = null;
-
-function ndcOf(x, y) {
-  let fx = x / window.innerWidth;
-  if (stereo) { if (fx >= 0.5) fx -= 0.5; fx *= 2; }
-  return { x: fx * 2 - 1, y: -(y / window.innerHeight * 2 - 1) };
-}
-function hitModel(x, y) {
-  if (!model || !model.visible) return false;
-  raycaster.setFromCamera(ndcOf(x, y), camera);
-  const box = new THREE.Box3().setFromObject(model);
-  return raycaster.ray.intersectsBox(box);
-}
-function planeHitLocal(x, y) {
-  raycaster.setFromCamera(ndcOf(x, y), camera);
-  stand.updateWorldMatrix(true, false);
-  const up = new THREE.Vector3(0, 1, 0).transformDirection(stand.matrixWorld);
-  const origin = new THREE.Vector3().setFromMatrixPosition(stand.matrixWorld);
-  plane.setFromNormalAndCoplanarPoint(up, origin);
-  const hit = new THREE.Vector3();
-  if (!raycaster.ray.intersectPlane(plane, hit)) return null;
-  return stand.worldToLocal(hit);
-}
-
-view.addEventListener('pointerdown', (e) => {
-  if (!started) return;
-  view.setPointerCapture(e.pointerId);
-  pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
-  if (pts.size === 1) {
-    tapInfo = { x: e.clientX, y: e.clientY, t: performance.now(), moved: false, hit: hitModel(e.clientX, e.clientY) };
-    dragging = tapInfo.hit;
-    if (dragging) {
-      const p = planeHitLocal(e.clientX, e.clientY);
-      if (p) grab.set(model.position.x - p.x, model.position.z - p.z);
-      else dragging = false;
-    }
-  } else if (pts.size === 2) {
-    dragging = false;
-    if (tapInfo) tapInfo.moved = true;
-    const [a, b] = [...pts.values()];
-    pinchPrev = { d: Math.hypot(a.x - b.x, a.y - b.y), ang: Math.atan2(b.y - a.y, b.x - a.x) };
-  }
+/* ================= ジャイロ ================= */
+let gyroOn = true, gotOrient = false, alphaOff = 0;
+const orient = {a:0, b:0, g:0};
+addEventListener('deviceorientation', e => {
+  if (e.beta == null) return;
+  gotOrient = true;
+  orient.a = e.alpha || 0; orient.b = e.beta || 0; orient.g = e.gamma || 0;
 });
-view.addEventListener('pointermove', (e) => {
-  if (!pts.has(e.pointerId)) return;
-  pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
-  if (pts.size === 1 && tapInfo) {
-    if (Math.hypot(e.clientX - tapInfo.x, e.clientY - tapInfo.y) > 8) tapInfo.moved = true;
-    if (dragging) {
-      const p = planeHitLocal(e.clientX, e.clientY);
-      if (p) { model.position.x = p.x + grab.x; model.position.z = p.z + grab.y; }
-    }
-  } else if (pts.size === 2 && model && pinchPrev) {
-    const [a, b] = [...pts.values()];
-    const d = Math.hypot(a.x - b.x, a.y - b.y), ang = Math.atan2(b.y - a.y, b.x - a.x);
-    if (pinchPrev.d > 0) model.scale.multiplyScalar(THREE.MathUtils.clamp(d / pinchPrev.d, 0.9, 1.1));
-    model.rotation.y -= ang - pinchPrev.ang;
-    pinchPrev = { d, ang };
-  }
-});
-function endPointer(e) {
-  if (!pts.has(e.pointerId)) return;
-  pts.delete(e.pointerId);
-  if (pts.size === 0) {
-    if (tapInfo && !tapInfo.moved && tapInfo.hit && performance.now() - tapInfo.t < 400) playSound();
-    tapInfo = null; dragging = false; pinchPrev = null;
-  }
-  if (pts.size < 2) pinchPrev = null;
+const _euler = new THREE.Euler(), _q0 = new THREE.Quaternion();
+const _q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
+const _zee = new THREE.Vector3(0, 0, 1);
+function applyGyro(){
+  const d = THREE.MathUtils.degToRad;
+  const scr = (screen.orientation ? screen.orientation.angle : window.orientation) || 0;
+  _euler.set(d(orient.b), d(orient.a - alphaOff), -d(orient.g), 'YXZ');
+  camera.quaternion.setFromEuler(_euler).multiply(_q1).multiply(_q0.setFromAxisAngle(_zee, -d(scr)));
 }
-view.addEventListener('pointerup', endPointer);
-view.addEventListener('pointercancel', endPointer);
 
-// ---------- 描画 ----------
-let lastVT = -1, frameNo = 0;
-const _right = new THREE.Vector3();
-
-function frame() {
-  requestAnimationFrame(frame);
-  if (!started) return;
-  layout();
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0, 0, W, H);
-  const vw = video.videoWidth, vh = video.videoHeight;
-  if (!vw || video.readyState < 2) return;
-
-  if (hasOrientation) camera.quaternion.copy(deviceQuat);
-  camera.position.set(0, 0, 0);
-  camera.updateMatrixWorld();
-
-  if (segmenter && video.currentTime !== lastVT) {
-    lastVT = video.currentTime;
-    try { segmenter.segmentForVideo(video, performance.now(), onSegment); } catch (e) { console.error(e); }
-  }
-  if (mode === 'marker' && detector && frameNo++ % 2 === 0) detectMarker();
-
-  if (model) {
-    model.visible = mode === 'gyro' || markerEver;
-    scene.updateMatrixWorld();
-    updateEyes();
-  }
-  if (hasMask) buildPerson();
-
-  const half = W >> 1;
-  const vps = stereo
-    ? [{ x: 0, y: 0, w: half, h: H, side: -1 }, { x: half, y: 0, w: half, h: H, side: 1 }]
-    : [{ x: 0, y: 0, w: W, h: H, side: 0 }];
-
-  for (const vp of vps) {
-    const [sx, sy, sw, sh] = coverRect(vw, vh, vp.w, vp.h);
-    ctx.drawImage(video, sx, sy, sw, sh, vp.x, vp.y, vp.w, vp.h);
-    if (model && model.visible) {
-      if (renderer.domElement.width !== vp.w || renderer.domElement.height !== vp.h) renderer.setSize(vp.w, vp.h, false);
-      camera.aspect = vp.w / vp.h;
-      camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan((sh / 2) / focalVideo()));
-      camera.updateProjectionMatrix();
-      if (vp.side) {
-        _right.set(1, 0, 0).applyQuaternion(camera.quaternion).multiplyScalar(vp.side * EYE_SEPARATION / 2);
-        camera.position.copy(_right);
-      } else camera.position.set(0, 0, 0);
-      renderer.render(scene, camera);
-      ctx.drawImage(renderer.domElement, 0, 0, vp.w, vp.h, vp.x, vp.y, vp.w, vp.h);
-    }
-    if (hasMask) ctx.drawImage(personCanvas, sx, sy, sw, sh, vp.x, vp.y, vp.w, vp.h);
-  }
-  camera.position.set(0, 0, 0);
-  camera.updateMatrixWorld();
-}
-frame();
-
-// ---------- ボタン ----------
-btnMain.addEventListener('click', async () => {
-  if (started) {
-    if (mode === 'gyro') placeGyro(); else placeMarker();
-    return;
-  }
-  btnMain.disabled = true;
+/* ================= 音 ================= */
+let actx = null; const sndCache = {};
+async function playSound(url){
+  if (!actx) return;
   try {
-    initAudio(); // ユーザー操作の中で音を有効化
-    if (typeof DeviceOrientationEvent !== 'undefined' &&
-        typeof DeviceOrientationEvent.requestPermission === 'function') {
-      const r = await DeviceOrientationEvent.requestPermission();
-      if (r !== 'granted') throw new Error('動きセンサーが許可されませんでした');
+    if (!sndCache[url]) {
+      const buf = await (await fetch(url)).arrayBuffer();
+      sndCache[url] = await actx.decodeAudioData(buf);
     }
-    info.textContent = 'カメラを起動中...';
-    video.srcObject = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 960 }, height: { ideal: 720 } },
-      audio: false
-    });
-    await video.play();
+    const s = actx.createBufferSource();
+    s.buffer = sndCache[url]; s.connect(actx.destination); s.start();
+  } catch(e){ console.warn('sound', e); }
+}
 
-    info.textContent = 'モデルと認識AIを読み込み中...';
-    await Promise.all([
-      new Promise((res, rej) => new GLTFLoader().load(MODEL_URL, (g) => {
-        model = g.scene;
-        stand.add(model);
-        model.add(sound);
-        findEyes();
-        res();
-      }, undefined, rej)),
-      initSegmenter()
-    ]);
+/* ================= モデル ================= */
+let model = null, mixer = null, curAction = null;
+const clips = [], morphs = {}, morphGoal = {}, eyes = [];
+const clock = new THREE.Clock();
 
-    started = true;
-    btnMain.textContent = '置き直す';
-    btnMain.disabled = false;
-    btnMode.disabled = btnStereo.disabled = btnSound.disabled = false;
-    setMode('gyro');
-  } catch (e) {
-    console.error(e);
-    info.textContent = 'エラー: ' + (e.message || e);
-    btnMain.disabled = false;
+function playClip(name, loop = false){
+  if (!mixer) return;
+  const clip = clips.find(c => c.name === name);
+  if (!clip) { console.warn('clip not found', name); return; }
+  const next = mixer.clipAction(clip);
+  next.reset();
+  next.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
+  next.clampWhenFinished = true;
+  next.fadeIn(0.2).play();
+  if (curAction && curAction !== next) curAction.fadeOut(0.2);
+  curAction = next;
+}
+function stopClip(){
+  if (curAction) { curAction.fadeOut(0.2); curAction = null; }
+}
+function setMorph(name, v){ morphGoal[name] = v; }
+
+async function loadModel(){
+  const gltf = await new GLTFLoader().loadAsync(MODEL_URL);
+  model = gltf.scene;
+  model.traverse(o => { o.frustumCulled = false; });
+
+  // 身長に合わせて拡縮し、足元を原点・水平中心を原点へ
+  let box = new THREE.Box3().setFromObject(model);
+  const size = box.getSize(new THREE.Vector3());
+  model.scale.setScalar(MODEL_H / (size.y || 1));
+  box = new THREE.Box3().setFromObject(model);
+  const c = box.getCenter(new THREE.Vector3());
+  model.position.set(-c.x, -box.min.y, -c.z);
+  anchor.add(model);
+  anchor.updateMatrixWorld(true);
+
+  // アニメ
+  gltf.animations.forEach(a => clips.push(a));
+  if (clips.length) mixer = new THREE.AnimationMixer(model);
+
+  // シェイプキー
+  model.traverse(o => {
+    if (o.isMesh && o.morphTargetDictionary) {
+      for (const [n, i] of Object.entries(o.morphTargetDictionary)) (morphs[n] ||= []).push([o, i]);
+    }
+  });
+
+  // 目のボーン
+  model.traverse(o => {
+    if (o.isBone && EYE_RE.test(o.name) && !NOT_EYE_RE.test(o.name)) {
+      o.userData.rest = o.quaternion.clone();
+      o.userData.cur  = new THREE.Quaternion();
+      eyes.push(o);
+    }
+  });
+
+  buildPanel();
+  placeInFront();
+}
+
+/* ================= 配置 ================= */
+const _fw = new THREE.Vector3();
+function placeInFront(){
+  camera.getWorldDirection(_fw);
+  _fw.y = 0;
+  if (_fw.lengthSq() < 1e-4) _fw.set(0, 0, -1);
+  _fw.normalize();
+  anchor.position.copy(_fw).multiplyScalar(START_DIST);
+  anchor.position.y = -0.8;
+  // こちらを向かせる (モデルの正面は +Z 想定)
+  anchor.rotation.set(0, Math.atan2(-_fw.x, -_fw.z) + 0, 0);
+  anchor.rotation.y = Math.atan2(-_fw.x, -_fw.z);
+  anchor.scale.setScalar(1);
+  alphaOff = orient.a;
+  nearArmed = true;
+}
+
+/* ================= 目線追従 ================= */
+const _camPos = new THREE.Vector3(), _aq = new THREE.Quaternion(), _fwd = new THREE.Vector3();
+const _bp = new THREE.Vector3(), _dir = new THREE.Vector3(), _pq = new THREE.Quaternion();
+const _delta = new THREE.Quaternion(), _tmp = new THREE.Quaternion(), _base = new THREE.Quaternion();
+let eyeOn = true;
+function updateEyes(){
+  if (!eyeOn || !eyes.length) return;
+  scene.updateMatrixWorld(true);
+  camera.getWorldPosition(_camPos);
+  anchor.getWorldQuaternion(_aq);
+  _fwd.set(0, 0, 1).applyQuaternion(_aq);
+  const max = THREE.MathUtils.degToRad(EYE_MAX_DEG);
+  for (const b of eyes) {
+    b.parent.getWorldQuaternion(_pq);
+    b.getWorldPosition(_bp);
+    _dir.copy(_camPos).sub(_bp).normalize();
+    _delta.setFromUnitVectors(_fwd, _dir);
+    const ang = 2 * Math.acos(Math.min(1, Math.abs(_delta.w)));
+    if (ang > max) { _tmp.copy(_delta); _delta.identity().slerp(_tmp, max / ang); }
+    b.userData.cur.slerp(_delta, 0.2);
+    _base.copy(_pq).multiply(b.quaternion);             // アニメ後の現在の世界回転
+    _tmp.copy(b.userData.cur).multiply(_base);           // 世界回転にずれを足す
+    b.quaternion.copy(_pq.invert()).multiply(_tmp);      // ローカルへ戻す
+  }
+}
+
+/* ================= ルール ================= */
+let nearArmed = true;
+function runRule(r){
+  if (r.clip) playClip(r.clip, !!r.loop);
+  if (r.morph) {
+    for (const [n, v] of Object.entries(r.morph)) setMorph(n, v);
+    if (r.hold != null) setTimeout(() => { for (const n in r.morph) setMorph(n, 0); }, r.hold * 1000);
+  }
+  if (r.sound) playSound(r.sound);
+}
+function fire(ev){ RULES.filter(r => r.on === ev).forEach(runRule); }
+function checkNear(){
+  const near = RULES.filter(r => r.on === 'near');
+  if (!near.length) return;
+  const dist = anchor.position.length();
+  const d = Math.min(...near.map(r => r.dist ?? 1));
+  if (nearArmed && dist < d) {
+    nearArmed = false;
+    near.filter(r => dist < (r.dist ?? 1)).forEach(runRule);
+  } else if (!nearArmed && dist > d * 1.2) nearArmed = true;
+}
+
+/* ================= UI ================= */
+function buildPanel(){
+  const cl = $('clips');
+  cl.innerHTML = '';
+  if (!clips.length) cl.textContent = '(アニメーションなし)';
+  clips.forEach(c => {
+    const b = document.createElement('button');
+    b.textContent = c.name || '(無名)';
+    b.onclick = () => playClip(c.name, false);
+    cl.appendChild(b);
+  });
+  if (clips.length) {
+    const s = document.createElement('button');
+    s.textContent = '停止'; s.onclick = stopClip; cl.appendChild(s);
+  }
+  renderMorphs('');
+  $('filter').oninput = e => renderMorphs(e.target.value);
+  $('status').textContent =
+    `目ボーン: ${eyes.length ? eyes.map(b => b.name).join(', ') : '見つからず'}\n` +
+    `アニメ: ${clips.length} / シェイプキー: ${Object.keys(morphs).length}`;
+}
+function renderMorphs(q){
+  const box = $('morphs');
+  box.innerHTML = '';
+  const names = Object.keys(morphs).filter(n => n.toLowerCase().includes(q.toLowerCase())).slice(0, 40);
+  names.forEach(n => {
+    const row = document.createElement('div'); row.className = 'm';
+    const lb = document.createElement('span'); lb.textContent = n;
+    const sl = document.createElement('input');
+    sl.type = 'range'; sl.min = 0; sl.max = 1; sl.step = 0.01;
+    sl.value = morphGoal[n] ?? morphs[n][0][0].morphTargetInfluences[morphs[n][0][1]] ?? 0;
+    sl.oninput = () => setMorph(n, parseFloat(sl.value));
+    row.append(lb, sl); box.appendChild(row);
+  });
+}
+function toggle(btn, on){ btn.classList.toggle('on', on); }
+
+$('bPlace').onclick = placeInFront;
+$('bGyro').onclick  = () => { gyroOn = !gyroOn; toggle($('bGyro'), gyroOn); if (!gyroOn) camera.quaternion.identity(); };
+$('bEye').onclick   = () => { eyeOn = !eyeOn; toggle($('bEye'), eyeOn); };
+$('bStereo').onclick = () => {
+  stereo = !stereo;
+  document.body.classList.toggle('stereo', stereo);
+  toggle($('bStereo'), stereo);
+  if (stereo) $('panel').classList.add('hidden');
+};
+$('bPanel').onclick = () => $('panel').classList.toggle('hidden');
+
+/* ================= タッチ操作 ================= */
+const ptrs = new Map();
+let last2 = null, down = null;
+const _r = new THREE.Vector3(), _u = new THREE.Vector3();
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+
+function pinch(){
+  const [a, b] = [...ptrs.values()];
+  return {d: Math.hypot(a.x - b.x, a.y - b.y) || 1, a: Math.atan2(b.y - a.y, b.x - a.x)};
+}
+function drag(dx, dy){
+  const dist = anchor.position.length() || START_DIST;
+  const k = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * dist / innerHeight;
+  _r.set(1, 0, 0).applyQuaternion(camera.quaternion);
+  _u.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  anchor.position.addScaledVector(_r, dx * k).addScaledVector(_u, -dy * k);
+}
+canvas.addEventListener('pointerdown', e => {
+  canvas.setPointerCapture(e.pointerId);
+  ptrs.set(e.pointerId, {x: e.clientX, y: e.clientY});
+  if (ptrs.size === 1) down = {x: e.clientX, y: e.clientY, t: performance.now(), moved: 0};
+  else { down = null; if (ptrs.size === 2) last2 = pinch(); }
+});
+canvas.addEventListener('pointermove', e => {
+  const p = ptrs.get(e.pointerId); if (!p) return;
+  const dx = e.clientX - p.x, dy = e.clientY - p.y;
+  p.x = e.clientX; p.y = e.clientY;
+  if (ptrs.size === 1) { if (down) down.moved += Math.abs(dx) + Math.abs(dy); drag(dx, dy); }
+  else if (ptrs.size === 2) {
+    const cur = pinch();
+    if (last2) {
+      const s = THREE.MathUtils.clamp(anchor.scale.x * cur.d / last2.d, 0.2, 5);
+      anchor.scale.setScalar(s);
+      let da = cur.a - last2.a;
+      if (da > Math.PI) da -= 2 * Math.PI; if (da < -Math.PI) da += 2 * Math.PI;
+      anchor.rotation.y += da;
+    }
+    last2 = cur;
   }
 });
-btnMode.addEventListener('click', () => setMode(mode === 'gyro' ? 'marker' : 'gyro'));
-btnSound.addEventListener('click', playSound);
-btnStereo.addEventListener('click', () => { stereo = true; document.body.classList.add('stereo'); });
-$('exit').addEventListener('click', () => { stereo = false; document.body.classList.remove('stereo'); });
+function up(e){
+  const had = ptrs.delete(e.pointerId);
+  if (ptrs.size < 2) last2 = null;
+  if (had && ptrs.size === 0 && down && down.moved < 10 && performance.now() - down.t < 350) onTap(e.clientX, e.clientY);
+  if (ptrs.size === 0) down = null;
+}
+canvas.addEventListener('pointerup', up);
+canvas.addEventListener('pointercancel', up);
+
+function onTap(x, y){
+  if (!model) return;
+  const w = innerWidth, h = innerHeight;
+  const vw = stereo ? w / 2 : w;
+  ndc.set(((x % vw) / vw) * 2 - 1, -(y / h) * 2 + 1);
+  camera.aspect = vw / h; camera.updateProjectionMatrix();
+  ray.setFromCamera(ndc, camera);
+  if (ray.intersectObject(model, true).length) fire('tap');
+}
+
+/* ================= 描画ループ ================= */
+function render(){
+  const w = innerWidth, h = innerHeight;
+  if (!stereo) {
+    renderer.setScissorTest(false);
+    renderer.setViewport(0, 0, w, h);
+    camera.aspect = w / h; camera.updateProjectionMatrix();
+    renderer.render(scene, camera);
+  } else {
+    const hw = w / 2;
+    camera.aspect = hw / h; camera.updateProjectionMatrix();
+    renderer.setScissorTest(true);
+    [-1, 1].forEach((s, i) => {
+      camera.translateX(s * STEREO_IPD);
+      camera.updateMatrixWorld(true);
+      renderer.setViewport(i * hw, 0, hw, h);
+      renderer.setScissor(i * hw, 0, hw, h);
+      renderer.render(scene, camera);
+      camera.translateX(-s * STEREO_IPD);
+    });
+  }
+}
+
+function tick(){
+  const dt = clock.getDelta();
+  if (gyroOn && gotOrient) applyGyro();
+
+  // 目はアニメ適用前に初期姿勢へ戻す(ずれの蓄積防止)
+  for (const b of eyes) b.quaternion.copy(b.userData.rest);
+  if (mixer) mixer.update(dt);
+
+  // シェイプキーの目標値へなめらかに寄せる
+  for (const n in morphGoal) {
+    const list = morphs[n]; if (!list) continue;
+    const cur = list[0][0].morphTargetInfluences[list[0][1]];
+    const v = cur + (morphGoal[n] - cur) * Math.min(1, dt * 12);
+    for (const [m, i] of list) m.morphTargetInfluences[i] = v;
+  }
+
+  camera.updateMatrixWorld(true);
+  updateEyes();
+  checkNear();
+  render();
+}
+
+/* ================= 開始 ================= */
+$('goBtn').onclick = async () => {
+  const err = $('err'); err.textContent = '';
+  try {
+    // iOSのセンサー許可は最初のawaitより前に呼ぶ
+    if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) {
+      try { await DeviceOrientationEvent.requestPermission(); } catch(e){ console.warn(e); }
+    }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) { actx = new AC(); actx.resume(); }
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {facingMode: {ideal: 'environment'}, width: {ideal: 1280}, height: {ideal: 720}}, audio: false
+    });
+    $('v1').srcObject = stream; $('v2').srcObject = stream;
+    $('v1').play(); $('v2').play();
+
+    await loadModel();
+    $('start').style.display = 'none';
+    $('bar').style.display = 'flex';
+    renderer.setAnimationLoop(tick);
+  } catch(e) {
+    err.textContent = 'エラー: ' + (e.message || e) +
+      '\n(HTTPSで開いているか、girl.glbが同じフォルダにあるか確認)';
+    console.error(e);
+  }
+};
 </script>
 </body>
 </html>
