@@ -1,472 +1,275 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<title>girl.glb AR</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>girl.glb 目線追従テスト</title>
 <style>
-  html,body{margin:0;height:100%;overflow:hidden;background:#000;color:#fff;
-    font:14px/1.4 -apple-system,"Hiragino Sans",sans-serif;touch-action:none;
-    -webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
-  #vids{position:fixed;inset:0;display:flex}
-  #vids video{flex:1;min-width:0;height:100%;object-fit:cover;background:#111}
-  #v2{display:none}
-  body.stereo #v2{display:block}
-  #cv{position:fixed;inset:0;width:100%;height:100%;display:block}
-
-  #bar{position:fixed;left:0;right:0;top:0;padding:calc(env(safe-area-inset-top) + 6px) 8px 6px;
-    display:flex;flex-wrap:wrap;gap:6px;z-index:5}
-  button{font:inherit;color:#fff;background:rgba(20,20,24,.72);border:1px solid rgba(255,255,255,.28);
-    border-radius:8px;padding:7px 10px;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
-  button.on{background:rgba(40,120,255,.75);border-color:rgba(160,200,255,.8)}
-  button:active{opacity:.7}
-
-  #panel{position:fixed;left:8px;right:8px;bottom:calc(env(safe-area-inset-bottom) + 8px);
-    max-height:42%;overflow:auto;background:rgba(15,15,18,.78);border-radius:12px;padding:10px;z-index:5;
-    -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);touch-action:pan-y}
-  #panel.hidden{display:none}
-  #panel h4{margin:8px 0 6px;font-size:13px;font-weight:600;opacity:.8}
-  #panel h4:first-child{margin-top:0}
-  .row{display:flex;flex-wrap:wrap;gap:6px}
-  .m{display:flex;align-items:center;gap:8px;margin:4px 0}
-  .m span{width:42%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
-  .m input{flex:1}
-  #filter{width:100%;box-sizing:border-box;padding:7px;border-radius:8px;border:1px solid #555;
-    background:#222;color:#fff;font-size:16px}
-  #status{font-size:11px;opacity:.75;white-space:pre-wrap;margin-top:8px}
-
-  #start{position:fixed;inset:0;z-index:20;background:#0b0d12;display:flex;flex-direction:column;
-    align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px}
-  #start button{font-size:18px;padding:14px 28px;background:#2b6cff;border-color:#2b6cff}
-  #start p{margin:0;max-width:22em;opacity:.8}
-  #err{color:#ff8a8a;white-space:pre-wrap;font-size:12px;max-width:26em}
+  html, body { margin: 0; height: 100%; background: #111; color: #eee; font: 12px/1.5 sans-serif; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #hud { position: fixed; left: 8px; top: 8px; right: 8px; pointer-events: none; text-shadow: 0 0 3px #000; white-space: pre-wrap; }
+  #spec { position: fixed; left: 8px; right: 8px; bottom: 8px; background: rgba(0,0,0,.7); border-radius: 8px; padding: 6px 10px; max-height: 45%; overflow: auto; }
+  #spec summary { cursor: pointer; font-weight: bold; }
+  #spec pre { white-space: pre-wrap; margin: 6px 0 0; font-size: 11px; }
 </style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
 </head>
 <body>
-<div id="vids"><video id="v1" playsinline muted autoplay></video><video id="v2" playsinline muted autoplay></video></div>
-<canvas id="cv"></canvas>
-
-<div id="bar" style="display:none">
-  <button id="bPlace">前に配置</button>
-  <button id="bGyro" class="on">ジャイロ</button>
-  <button id="bEye" class="on">目線</button>
-  <button id="bStereo">2画面</button>
-  <button id="bPanel">操作</button>
-</div>
-
-<div id="panel" class="hidden">
-  <h4>アニメーション</h4>
-  <div class="row" id="clips"></div>
-  <h4>シェイプキー</h4>
-  <input id="filter" placeholder="名前で絞り込み">
-  <div id="morphs"></div>
-  <div id="status"></div>
-</div>
-
-<div id="start">
-  <p>girl.glb をカメラ映像に重ねて表示します。<br>1本指: 移動 / 2本指: 拡大縮小・回転</p>
-  <button id="goBtn">開始</button>
-  <div id="err"></div>
-</div>
-
-<script type="importmap">
-{"imports":{
-  "three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-}}
-</script>
+<div id="hud">読み込み中…</div>
+<details id="spec"><summary>設定 / Swift移植メモ</summary><pre id="specText"></pre></details>
 
 <script type="module">
-import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
-/* ================= 設定 ================= */
-const MODEL_URL   = 'girl.glb';
-const MODEL_H     = 1.6;     // 表示する身長(m)
-const START_DIST  = 2.5;     // 配置距離(m)
-const EYE_MAX_DEG = 25;      // 目の最大回転角
-const STEREO_IPD  = 0.03;    // 2画面時の左右カメラのずれ(m)
-const EYE_RE      = /(eye|目|眼)/i;
-const NOT_EYE_RE  = /(lid|brow|lash|まぶた|眉|まつ)/i;
+/* =====================================================================
+ * 設定（SETTINGS）— ここだけを後でSwiftに移植する
+ * ---------------------------------------------------------------------
+ * 【Swift移植メモ】
+ *  - この SETTINGS が「挙動の仕様書」。Swift側では同じ名前・同じ値の
+ *    struct (例: GazeSettings) にそのまま写す。
+ *  - 「カメラ」= Webでは操作中のカメラ、Swiftでは ARFrame.camera.transform
+ *    （= プレイヤーのiPhone）。
+ *  - 動きの順序（これが仕様の核）:
+ *      ① 目がカメラを即座に見る（eyeSmoothing: 速い）
+ *      ② headDelaySec 秒遅れて、頭が「その時点のカメラ位置」へ動き出す
+ *      ③ 頭の回転が headOnlyDeg を超えた分は、首が回して分担する
+ *      ④ 頭＋首の合計は maxAngleDeg まで。それ以上は目だけが追う
+ *  - 骨の操作: RealityKitなら ModelEntity.jointTransforms、
+ *    SceneKitなら SCNNode の orientation を、アニメ再生後に上書きする。
+ *  - 毎フレームの順序: 補正を戻す → アニメ更新 → 補正前の姿勢を保存
+ *    → 目線補正を適用（この順序も移植すること）。
+ *  - 補正計算は数学だけなので simd_quatf / SIMD3<Float> にそのまま置換可能。
+ *  - girl.glb は MMD系の骨名（頭/首/目.L/目.R）。USDZ変換後に名前が
+ *    変わる場合は bones の名前だけ直す。
+ * ===================================================================== */
+const SETTINGS = {
+  model: "girl.glb",
+  idle: {
+    clipNames: ["idle", "Idle", "待機", "Standing"], // この順で探す
+    fallbackToFirstClip: true,                       // 無ければ最初のクリップ
+  },
+  gaze: {
+    maxAngleDeg: 15,       // 頭＋首の合計の上限
+    headOnlyDeg: 10,       // 頭だけで回す範囲。超えた分を首が回す
+    headDelaySec: 0.25,    // 目が見てから、頭が動き出すまでの遅れ
+    headSmoothing: 6,      // 頭の追従の速さ（大きいほど速い）
+    eyeMaxDeg: 25,         // 目が正面から向ける最大角度
+    eyeSmoothing: 30,      // 目の追従の速さ
+    forwardWorldAtRest: [0, 0, 1], // 初期姿勢でモデルが正面を向く方向（ワールド）
+    bones: {               // 名前の候補（three.jsは「.」を消すので両方書く）
+      head: ["頭", "head"],
+      neck: ["首", "neck"],
+      eyes: [["目.L", "目L"], ["目.R", "目R"]],
+    },
+  },
+};
 
-/* 条件ルール: on = 'tap' | 'near'
-   clip : アニメ名 / loop: true で繰り返し
-   morph: {シェイプキー名: 値} / hold: 秒後に0へ戻す
-   sound: 音声ファイルURL
-   near : dist(m) 以内に近づいたら1回発火 (離れると再武装)
-   例:
-   { on:'tap',  clip:'Wave' },
-   { on:'tap',  morph:{Smile:1}, hold:2 },
-   { on:'near', dist:1.2, clip:'Hello', sound:'hello.mp3' },
-*/
-const RULES = [
-];
+const hud = document.getElementById("hud");
+const specText = document.getElementById("specText");
+const G = SETTINGS.gaze;
+const DEG = THREE.MathUtils.degToRad(1);
 
-/* ================= 基本セットアップ ================= */
-const $ = id => document.getElementById(id);
-const canvas = $('cv');
-const renderer = new THREE.WebGLRenderer({canvas, alpha:true, antialias:true, powerPreference:'low-power'});
+/* ---------- three.js 基本 ---------- */
+const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.setClearColor(0x000000, 0);
+renderer.setSize(innerWidth, innerHeight);
+document.body.prepend(renderer.domElement);
 
-const scene  = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(60, 1, 0.05, 50);
-scene.add(new THREE.HemisphereLight(0xffffff, 0x667788, 1.6));
-const sun = new THREE.DirectionalLight(0xffffff, 1.6);
-sun.position.set(1, 2, 2);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x222428);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444455, 1.2));
+const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+sun.position.set(2, 4, 3);
 scene.add(sun);
+scene.add(new THREE.GridHelper(4, 8, 0x555555, 0x333333));
 
-/* anchor: 後で「頭の位置」「体の表/裏」に合わせて動かす対象。
-   今は手動操作(ドラッグ等)で位置・向き・大きさを決める。 */
-const anchor = new THREE.Group();
-scene.add(anchor);
-
-let stereo = false;
-function resize(){
-  renderer.setSize(innerWidth, innerHeight, false);
-}
-addEventListener('resize', resize);
-addEventListener('orientationchange', () => setTimeout(resize, 200));
-resize();
-
-/* ================= ジャイロ ================= */
-let gyroOn = true, gotOrient = false, alphaOff = 0;
-const orient = {a:0, b:0, g:0};
-addEventListener('deviceorientation', e => {
-  if (e.beta == null) return;
-  gotOrient = true;
-  orient.a = e.alpha || 0; orient.b = e.beta || 0; orient.g = e.gamma || 0;
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.05, 100);
+const controls = new OrbitControls(camera, renderer.domElement);
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
 });
-const _euler = new THREE.Euler(), _q0 = new THREE.Quaternion();
-const _q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
-const _zee = new THREE.Vector3(0, 0, 1);
-function applyGyro(){
-  const d = THREE.MathUtils.degToRad;
-  const scr = (screen.orientation ? screen.orientation.angle : window.orientation) || 0;
-  _euler.set(d(orient.b), d(orient.a - alphaOff), -d(orient.g), 'YXZ');
-  camera.quaternion.setFromEuler(_euler).multiply(_q1).multiply(_q0.setFromAxisAngle(_zee, -d(scr)));
-}
 
-/* ================= 音 ================= */
-let actx = null; const sndCache = {};
-async function playSound(url){
-  if (!actx) return;
-  try {
-    if (!sndCache[url]) {
-      const buf = await (await fetch(url)).arrayBuffer();
-      sndCache[url] = await actx.decodeAudioData(buf);
-    }
-    const s = actx.createBufferSource();
-    s.buffer = sndCache[url]; s.connect(actx.destination); s.start();
-  } catch(e){ console.warn('sound', e); }
-}
-
-/* ================= モデル ================= */
-let model = null, mixer = null, curAction = null;
-const clips = [], morphs = {}, morphGoal = {}, eyes = [];
+/* ---------- 状態 ---------- */
+let mixer = null;
+const rig = { head: null, neck: null, eyes: [] };  // 各 {bone, axis, saved, q}
+const info = { clip: "なし", clips: [], bones: [] };
 const clock = new THREE.Clock();
+const history = [];                                // カメラ位置の履歴（頭の遅れ用）
+const stat = { total: 0, eyeDeg: 0, clamped: false };
 
-function playClip(name, loop = false){
-  if (!mixer) return;
-  const clip = clips.find(c => c.name === name);
-  if (!clip) { console.warn('clip not found', name); return; }
-  const next = mixer.clipAction(clip);
-  next.reset();
-  next.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
-  next.clampWhenFinished = true;
-  next.fadeIn(0.2).play();
-  if (curAction && curAction !== next) curAction.fadeOut(0.2);
-  curAction = next;
+/* ---------- ボーン探索 ---------- */
+function findBone(root, names, keyword) {
+  let exact = null, partial = null;
+  root.traverse(o => {
+    const n = o.name, u = o.userData && o.userData.name;
+    if (names.includes(n) || (u && names.includes(u))) exact = exact || o;
+    else if (keyword && n.toLowerCase().includes(keyword)) {
+      if (!partial || n.length < partial.name.length) partial = o;
+    }
+  });
+  return exact || partial;
 }
-function stopClip(){
-  if (curAction) { curAction.fadeOut(0.2); curAction = null; }
+function makeEntry(bone) {
+  // 初期姿勢で「正面」がボーンのローカルのどの軸かを求める
+  const restQ = bone.getWorldQuaternion(new THREE.Quaternion());
+  const axis = new THREE.Vector3(...G.forwardWorldAtRest).normalize().applyQuaternion(restQ.invert());
+  return { bone, axis, saved: bone.quaternion.clone(), q: new THREE.Quaternion() };
 }
-function setMorph(name, v){ morphGoal[name] = v; }
+const allEntries = () => [rig.neck, rig.head, ...rig.eyes].filter(Boolean);
 
-async function loadModel(){
-  const gltf = await new GLTFLoader().loadAsync(MODEL_URL);
-  model = gltf.scene;
-  model.traverse(o => { o.frustumCulled = false; });
+/* ---------- 読み込み ---------- */
+new GLTFLoader().load(SETTINGS.model, gltf => {
+  const model = gltf.scene;
+  scene.add(model);
+  model.updateMatrixWorld(true);
 
-  // 身長に合わせて拡縮し、足元を原点・水平中心を原点へ
-  let box = new THREE.Box3().setFromObject(model);
+  model.traverse(o => { if (o.isBone) info.bones.push(o.name); });
+  info.clips = gltf.animations.map(a => a.name);
+
+  if (gltf.animations.length) {
+    mixer = new THREE.AnimationMixer(model);
+    let clip = null;
+    for (const n of SETTINGS.idle.clipNames) {
+      clip = gltf.animations.find(a => a.name === n);
+      if (clip) break;
+    }
+    if (!clip && SETTINGS.idle.fallbackToFirstClip) clip = gltf.animations[0];
+    if (clip) { mixer.clipAction(clip).play(); info.clip = clip.name; }
+  }
+
+  const h = findBone(model, G.bones.head, "head");
+  const n = findBone(model, G.bones.neck, "neck");
+  if (h) rig.head = makeEntry(h);
+  if (n) rig.neck = makeEntry(n);
+  G.bones.eyes.forEach(names => {
+    const e = findBone(model, names, null);
+    if (e) rig.eyes.push(makeEntry(e));
+  });
+
+  // カメラを頭の正面に置く
+  const box = new THREE.Box3().setFromObject(model);
   const size = box.getSize(new THREE.Vector3());
-  model.scale.setScalar(MODEL_H / (size.y || 1));
-  box = new THREE.Box3().setFromObject(model);
-  const c = box.getCenter(new THREE.Vector3());
-  model.position.set(-c.x, -box.min.y, -c.z);
-  anchor.add(model);
-  anchor.updateMatrixWorld(true);
+  const target = h ? h.getWorldPosition(new THREE.Vector3()) : box.getCenter(new THREE.Vector3());
+  controls.target.copy(target);
+  camera.position.set(target.x, target.y, target.z + Math.min(Math.max(size.y, 1), 2) * 0.8);
+  controls.update();
 
-  // アニメ
-  gltf.animations.forEach(a => clips.push(a));
-  if (clips.length) mixer = new THREE.AnimationMixer(model);
-
-  // シェイプキー
-  model.traverse(o => {
-    if (o.isMesh && o.morphTargetDictionary) {
-      for (const [n, i] of Object.entries(o.morphTargetDictionary)) (morphs[n] ||= []).push([o, i]);
-    }
-  });
-
-  // 目のボーン
-  model.traverse(o => {
-    if (o.isBone && EYE_RE.test(o.name) && !NOT_EYE_RE.test(o.name)) {
-      o.userData.rest = o.quaternion.clone();
-      o.userData.cur  = new THREE.Quaternion();
-      eyes.push(o);
-    }
-  });
-
-  buildPanel();
-  placeInFront();
-}
-
-/* ================= 配置 ================= */
-const _fw = new THREE.Vector3();
-function placeInFront(){
-  camera.getWorldDirection(_fw);
-  _fw.y = 0;
-  if (_fw.lengthSq() < 1e-4) _fw.set(0, 0, -1);
-  _fw.normalize();
-  anchor.position.copy(_fw).multiplyScalar(START_DIST);
-  anchor.position.y = -0.8;
-  // こちらを向かせる (モデルの正面は +Z 想定)
-  anchor.rotation.set(0, Math.atan2(-_fw.x, -_fw.z) + 0, 0);
-  anchor.rotation.y = Math.atan2(-_fw.x, -_fw.z);
-  anchor.scale.setScalar(1);
-  alphaOff = orient.a;
-  nearArmed = true;
-}
-
-/* ================= 目線追従 ================= */
-const _camPos = new THREE.Vector3(), _aq = new THREE.Quaternion(), _fwd = new THREE.Vector3();
-const _bp = new THREE.Vector3(), _dir = new THREE.Vector3(), _pq = new THREE.Quaternion();
-const _delta = new THREE.Quaternion(), _tmp = new THREE.Quaternion(), _base = new THREE.Quaternion();
-let eyeOn = true;
-function updateEyes(){
-  if (!eyeOn || !eyes.length) return;
-  scene.updateMatrixWorld(true);
-  camera.getWorldPosition(_camPos);
-  anchor.getWorldQuaternion(_aq);
-  _fwd.set(0, 0, 1).applyQuaternion(_aq);
-  const max = THREE.MathUtils.degToRad(EYE_MAX_DEG);
-  for (const b of eyes) {
-    b.parent.getWorldQuaternion(_pq);
-    b.getWorldPosition(_bp);
-    _dir.copy(_camPos).sub(_bp).normalize();
-    _delta.setFromUnitVectors(_fwd, _dir);
-    const ang = 2 * Math.acos(Math.min(1, Math.abs(_delta.w)));
-    if (ang > max) { _tmp.copy(_delta); _delta.identity().slerp(_tmp, max / ang); }
-    b.userData.cur.slerp(_delta, 0.2);
-    _base.copy(_pq).multiply(b.quaternion);             // アニメ後の現在の世界回転
-    _tmp.copy(b.userData.cur).multiply(_base);           // 世界回転にずれを足す
-    b.quaternion.copy(_pq.invert()).multiply(_tmp);      // ローカルへ戻す
-  }
-}
-
-/* ================= ルール ================= */
-let nearArmed = true;
-function runRule(r){
-  if (r.clip) playClip(r.clip, !!r.loop);
-  if (r.morph) {
-    for (const [n, v] of Object.entries(r.morph)) setMorph(n, v);
-    if (r.hold != null) setTimeout(() => { for (const n in r.morph) setMorph(n, 0); }, r.hold * 1000);
-  }
-  if (r.sound) playSound(r.sound);
-}
-function fire(ev){ RULES.filter(r => r.on === ev).forEach(runRule); }
-function checkNear(){
-  const near = RULES.filter(r => r.on === 'near');
-  if (!near.length) return;
-  const dist = anchor.position.length();
-  const d = Math.min(...near.map(r => r.dist ?? 1));
-  if (nearArmed && dist < d) {
-    nearArmed = false;
-    near.filter(r => dist < (r.dist ?? 1)).forEach(runRule);
-  } else if (!nearArmed && dist > d * 1.2) nearArmed = true;
-}
-
-/* ================= UI ================= */
-function buildPanel(){
-  const cl = $('clips');
-  cl.innerHTML = '';
-  if (!clips.length) cl.textContent = '(アニメーションなし)';
-  clips.forEach(c => {
-    const b = document.createElement('button');
-    b.textContent = c.name || '(無名)';
-    b.onclick = () => playClip(c.name, false);
-    cl.appendChild(b);
-  });
-  if (clips.length) {
-    const s = document.createElement('button');
-    s.textContent = '停止'; s.onclick = stopClip; cl.appendChild(s);
-  }
-  renderMorphs('');
-  $('filter').oninput = e => renderMorphs(e.target.value);
-  $('status').textContent =
-    `目ボーン: ${eyes.length ? eyes.map(b => b.name).join(', ') : '見つからず'}\n` +
-    `アニメ: ${clips.length} / シェイプキー: ${Object.keys(morphs).length}`;
-}
-function renderMorphs(q){
-  const box = $('morphs');
-  box.innerHTML = '';
-  const names = Object.keys(morphs).filter(n => n.toLowerCase().includes(q.toLowerCase())).slice(0, 40);
-  names.forEach(n => {
-    const row = document.createElement('div'); row.className = 'm';
-    const lb = document.createElement('span'); lb.textContent = n;
-    const sl = document.createElement('input');
-    sl.type = 'range'; sl.min = 0; sl.max = 1; sl.step = 0.01;
-    sl.value = morphGoal[n] ?? morphs[n][0][0].morphTargetInfluences[morphs[n][0][1]] ?? 0;
-    sl.oninput = () => setMorph(n, parseFloat(sl.value));
-    row.append(lb, sl); box.appendChild(row);
-  });
-}
-function toggle(btn, on){ btn.classList.toggle('on', on); }
-
-$('bPlace').onclick = placeInFront;
-$('bGyro').onclick  = () => { gyroOn = !gyroOn; toggle($('bGyro'), gyroOn); if (!gyroOn) camera.quaternion.identity(); };
-$('bEye').onclick   = () => { eyeOn = !eyeOn; toggle($('bEye'), eyeOn); };
-$('bStereo').onclick = () => {
-  stereo = !stereo;
-  document.body.classList.toggle('stereo', stereo);
-  toggle($('bStereo'), stereo);
-  if (stereo) $('panel').classList.add('hidden');
-};
-$('bPanel').onclick = () => $('panel').classList.toggle('hidden');
-
-/* ================= タッチ操作 ================= */
-const ptrs = new Map();
-let last2 = null, down = null;
-const _r = new THREE.Vector3(), _u = new THREE.Vector3();
-const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
-
-function pinch(){
-  const [a, b] = [...ptrs.values()];
-  return {d: Math.hypot(a.x - b.x, a.y - b.y) || 1, a: Math.atan2(b.y - a.y, b.x - a.x)};
-}
-function drag(dx, dy){
-  const dist = anchor.position.length() || START_DIST;
-  const k = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * dist / innerHeight;
-  _r.set(1, 0, 0).applyQuaternion(camera.quaternion);
-  _u.set(0, 1, 0).applyQuaternion(camera.quaternion);
-  anchor.position.addScaledVector(_r, dx * k).addScaledVector(_u, -dy * k);
-}
-canvas.addEventListener('pointerdown', e => {
-  canvas.setPointerCapture(e.pointerId);
-  ptrs.set(e.pointerId, {x: e.clientX, y: e.clientY});
-  if (ptrs.size === 1) down = {x: e.clientX, y: e.clientY, t: performance.now(), moved: 0};
-  else { down = null; if (ptrs.size === 2) last2 = pinch(); }
+  specText.textContent = buildSpecText();
+}, undefined, err => {
+  hud.textContent = "girl.glb を読み込めません。index_gaze.html と同じフォルダに置き、" +
+    "file:// ではなくGitHub Pagesやローカルサーバーで開いてください。\n" + err;
 });
-canvas.addEventListener('pointermove', e => {
-  const p = ptrs.get(e.pointerId); if (!p) return;
-  const dx = e.clientX - p.x, dy = e.clientY - p.y;
-  p.x = e.clientX; p.y = e.clientY;
-  if (ptrs.size === 1) { if (down) down.moved += Math.abs(dx) + Math.abs(dy); drag(dx, dy); }
-  else if (ptrs.size === 2) {
-    const cur = pinch();
-    if (last2) {
-      const s = THREE.MathUtils.clamp(anchor.scale.x * cur.d / last2.d, 0.2, 5);
-      anchor.scale.setScalar(s);
-      let da = cur.a - last2.a;
-      if (da > Math.PI) da -= 2 * Math.PI; if (da < -Math.PI) da += 2 * Math.PI;
-      anchor.rotation.y += da;
-    }
-    last2 = cur;
+
+/* ---------- 目線補正（純粋な数学。Swiftへそのまま移植する部分） ---------- */
+const _f = new THREE.Vector3(), _t = new THREE.Vector3(), _p = new THREE.Vector3(), _dp = new THREE.Vector3();
+const _id = new THREE.Quaternion(), _q = new THREE.Quaternion(), _lim = new THREE.Quaternion();
+
+// ボーンのワールド回転を desired にする（親のワールド回転を考慮してローカルへ変換）
+function setWorldQuat(bone, desired) {
+  bone.parent.updateWorldMatrix(true, false);
+  const pq = bone.parent.getWorldQuaternion(new THREE.Quaternion());
+  bone.quaternion.copy(pq.invert().multiply(desired));
+  bone.updateMatrixWorld(true);
+}
+// 「f→t」の回転を maxRad までに制限して out に入れる。戻り値は元の角度
+function limitedRotation(f, t, maxRad, out) {
+  const angle = f.angleTo(t);
+  _q.setFromUnitVectors(f, t);
+  out.copy(_id).slerp(_q, angle > maxRad ? maxRad / angle : 1);
+  return angle;
+}
+// 過去のカメラ位置（time秒前）
+function delayedCameraPos(now, delay, out) {
+  const want = now - delay;
+  let pick = history[0];
+  for (const s of history) { if (s.t <= want) pick = s; else break; }
+  return out.copy(pick.pos);
+}
+const headQ = new THREE.Quaternion();
+
+function applyGaze(dt, now) {
+  const { head, neck, eyes } = rig;
+  if (!head) return;
+
+  // --- 頭＋首：遅れたカメラ位置へ ---
+  const headOrig = head.bone.getWorldQuaternion(new THREE.Quaternion());
+  const neckOrig = neck ? neck.bone.getWorldQuaternion(new THREE.Quaternion()) : null;
+  head.bone.getWorldPosition(_p);
+  _f.copy(head.axis).applyQuaternion(headOrig).normalize();
+  _t.copy(delayedCameraPos(now, G.headDelaySec, _dp)).sub(_p).normalize();
+  const ang = limitedRotation(_f, _t, G.maxAngleDeg * DEG, _lim);
+  stat.clamped = ang > G.maxAngleDeg * DEG;
+  headQ.slerp(_lim, 1 - Math.exp(-G.headSmoothing * dt));
+
+  // 合計角のうち headOnlyDeg を超えた分を首が担当
+  const total = 2 * Math.acos(Math.min(1, Math.abs(headQ.w)));
+  stat.total = total;
+  const neckRatio = neck && total > G.headOnlyDeg * DEG ? (total - G.headOnlyDeg * DEG) / total : 0;
+  if (neck && neckRatio > 0) {
+    setWorldQuat(neck.bone, _id.clone().slerp(headQ, neckRatio).multiply(neckOrig));
+  }
+  setWorldQuat(head.bone, headQ.clone().multiply(headOrig));
+
+  // --- 目：今のカメラ位置を即座に見る ---
+  eyes.forEach(e => {
+    const eo = e.bone.getWorldQuaternion(new THREE.Quaternion());
+    e.bone.getWorldPosition(_p);
+    _f.copy(e.axis).applyQuaternion(eo).normalize();
+    _t.copy(camera.position).sub(_p).normalize();
+    limitedRotation(_f, _t, G.eyeMaxDeg * DEG, _lim);
+    e.q.slerp(_lim, 1 - Math.exp(-G.eyeSmoothing * dt));
+    setWorldQuat(e.bone, e.q.clone().multiply(eo));
+  });
+  stat.eyeDeg = eyes.length ? 2 * Math.acos(Math.min(1, Math.abs(eyes[0].q.w))) / DEG : 0;
+}
+
+/* ---------- メインループ ---------- */
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.1);
+  const now = clock.elapsedTime;
+  controls.update();
+
+  history.push({ t: now, pos: camera.position.clone() });
+  while (history.length > 1 && history[0].t < now - 2) history.shift();
+
+  allEntries().forEach(e => e.bone.quaternion.copy(e.saved));   // ① 補正を戻す
+  if (mixer) mixer.update(dt);                                  // ② アニメ更新
+  allEntries().forEach(e => e.saved.copy(e.bone.quaternion));   // ③ 補正前を保存
+  applyGaze(dt, now);                                           // ④ 目線補正
+  renderer.render(scene, camera);
+
+  if (rig.head) {
+    const tot = stat.total / DEG;
+    const headDeg = Math.min(tot, G.headOnlyDeg);
+    const neckDeg = Math.max(0, tot - G.headOnlyDeg);
+    hud.textContent =
+      `クリップ: ${info.clip}\n` +
+      `目: ${stat.eyeDeg.toFixed(1)}° / 頭: ${headDeg.toFixed(1)}° / 首: ${neckDeg.toFixed(1)}°` +
+      (stat.clamped ? `（頭＋首が上限${G.maxAngleDeg}°で制限中）` : "") + "\n" +
+      `使用ボーン: 首=${rig.neck ? rig.neck.bone.name : "なし"} 頭=${rig.head.bone.name} 目=${rig.eyes.length}個`;
+  } else if (info.bones.length) {
+    hud.textContent = "頭ボーンが見つかりません。下の骨名一覧を見て SETTINGS.gaze.bones を直してください。";
   }
 });
-function up(e){
-  const had = ptrs.delete(e.pointerId);
-  if (ptrs.size < 2) last2 = null;
-  if (had && ptrs.size === 0 && down && down.moved < 10 && performance.now() - down.t < 350) onTap(e.clientX, e.clientY);
-  if (ptrs.size === 0) down = null;
+
+/* ---------- 画面内の仕様メモ ---------- */
+function buildSpecText() {
+  return "【SETTINGS（これをSwiftに移植）】\n" + JSON.stringify(SETTINGS, null, 2) +
+    "\n\n【検出結果】\nクリップ: " + (info.clips.join(", ") || "なし（glbにアニメーション無し）") +
+    "\n使用ボーン: " + allEntries().map(e => e.bone.name).join(", ") +
+    "\n骨名一覧: " + (info.bones.join(", ") || "なし") +
+    "\n\n【動きの順序】目が見る → headDelaySec後に頭 → headOnlyDeg超過分は首 → 合計maxAngleDegまで" +
+    "\n【Swift側の対応】カメラ=ARFrame.camera.transform / 骨=jointTransforms or SCNNode";
 }
-canvas.addEventListener('pointerup', up);
-canvas.addEventListener('pointercancel', up);
-
-function onTap(x, y){
-  if (!model) return;
-  const w = innerWidth, h = innerHeight;
-  const vw = stereo ? w / 2 : w;
-  ndc.set(((x % vw) / vw) * 2 - 1, -(y / h) * 2 + 1);
-  camera.aspect = vw / h; camera.updateProjectionMatrix();
-  ray.setFromCamera(ndc, camera);
-  if (ray.intersectObject(model, true).length) fire('tap');
-}
-
-/* ================= 描画ループ ================= */
-function render(){
-  const w = innerWidth, h = innerHeight;
-  if (!stereo) {
-    renderer.setScissorTest(false);
-    renderer.setViewport(0, 0, w, h);
-    camera.aspect = w / h; camera.updateProjectionMatrix();
-    renderer.render(scene, camera);
-  } else {
-    const hw = w / 2;
-    camera.aspect = hw / h; camera.updateProjectionMatrix();
-    renderer.setScissorTest(true);
-    [-1, 1].forEach((s, i) => {
-      camera.translateX(s * STEREO_IPD);
-      camera.updateMatrixWorld(true);
-      renderer.setViewport(i * hw, 0, hw, h);
-      renderer.setScissor(i * hw, 0, hw, h);
-      renderer.render(scene, camera);
-      camera.translateX(-s * STEREO_IPD);
-    });
-  }
-}
-
-function tick(){
-  const dt = clock.getDelta();
-  if (gyroOn && gotOrient) applyGyro();
-
-  // 目はアニメ適用前に初期姿勢へ戻す(ずれの蓄積防止)
-  for (const b of eyes) b.quaternion.copy(b.userData.rest);
-  if (mixer) mixer.update(dt);
-
-  // シェイプキーの目標値へなめらかに寄せる
-  for (const n in morphGoal) {
-    const list = morphs[n]; if (!list) continue;
-    const cur = list[0][0].morphTargetInfluences[list[0][1]];
-    const v = cur + (morphGoal[n] - cur) * Math.min(1, dt * 12);
-    for (const [m, i] of list) m.morphTargetInfluences[i] = v;
-  }
-
-  camera.updateMatrixWorld(true);
-  updateEyes();
-  checkNear();
-  render();
-}
-
-/* ================= 開始 ================= */
-$('goBtn').onclick = async () => {
-  const err = $('err'); err.textContent = '';
-  try {
-    // iOSのセンサー許可は最初のawaitより前に呼ぶ
-    if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) {
-      try { await DeviceOrientationEvent.requestPermission(); } catch(e){ console.warn(e); }
-    }
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if (AC) { actx = new AC(); actx.resume(); }
-
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: {facingMode: {ideal: 'environment'}, width: {ideal: 1280}, height: {ideal: 720}}, audio: false
-    });
-    $('v1').srcObject = stream; $('v2').srcObject = stream;
-    $('v1').play(); $('v2').play();
-
-    await loadModel();
-    $('start').style.display = 'none';
-    $('bar').style.display = 'flex';
-    renderer.setAnimationLoop(tick);
-  } catch(e) {
-    err.textContent = 'エラー: ' + (e.message || e) +
-      '\n(HTTPSで開いているか、girl.glbが同じフォルダにあるか確認)';
-    console.error(e);
-  }
-};
 </script>
 </body>
 </html>
