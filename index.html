@@ -42,6 +42,9 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
  *      ③ 頭の回転が headOnlyDeg を超えた分は、首が回して分担する
  *      ④ 頭＋首は左右 maxYawDeg・上下 maxPitchDeg まで。それ以上は目だけが追う
  *         （上下左右は「頭の正面・上・右」の3軸に分けて別々に制限する）
+ *      ⑤ 目が上へ startDeg 以上向いたら、上まぶたのモーフを 0→1 へ段階的に上げる
+ *         （上を向く角度 = 目の向きの「上方向成分」。頭の動きを引いた、目だけの動き）
+ *         モーフの値は「アニメ側の値 + まぶた補正」(上限1)。Swiftでは blendShape の weight に同じ式を使う
  *  - 骨の操作: RealityKitなら ModelEntity.jointTransforms、
  *    SceneKitなら SCNNode の orientation を、アニメ再生後に上書きする。
  *  - 毎フレームの順序: 補正を戻す → アニメ更新 → 補正前の姿勢を保存
@@ -67,6 +70,12 @@ const SETTINGS = {
     eyeMaxDeg: 25,         // 目が正面から向ける最大角度
     eyeSmoothing: 30,      // 目の追従の速さ
     forwardWorldAtRest: [0, 0, 1], // 初期姿勢でモデルが正面を向く方向（ワールド）
+    eyelid: {              // 目が上を向くと、上まぶたも連動して上がる
+      morph: "まぶたを上げる", // シェイプキー（モーフ）名
+      startDeg: 14,          // 目が正面からこの角度以上上を向いたら動き出す
+      fullDeg: 25,           // この角度で最大（1.0）。eyeMaxDegと同じにしておく
+      smoothing: 15,         // 動きの滑らかさ（大きいほど速い）
+    },
     bones: {               // 名前の候補（three.jsは「.」を消すので両方書く）
       head: ["頭", "head"],
       neck: ["首", "neck"],
@@ -108,7 +117,9 @@ const rig = { head: null, neck: null, eyes: [] };  // 各 {bone, axis, saved, q}
 const info = { clip: "なし", clips: [], bones: [] };
 const clock = new THREE.Clock();
 const history = [];                                // カメラ位置の履歴（頭の遅れ用）
-const stat = { total: 0, eyeDeg: 0, clamped: false };
+const stat = { total: 0, eyeDeg: 0, eyeUpDeg: 0, clamped: false };
+const morphs = [];        // まぶたのモーフ [{mesh, i, saved}]
+let lidValue = 0;         // 現在のまぶた補正 0〜1
 
 /* ---------- ボーン探索 ---------- */
 function findBone(root, names, keyword) {
@@ -175,6 +186,15 @@ new GLTFLoader().load(SETTINGS.model, gltf => {
   G.bones.eyes.forEach(names => {
     const e = findBone(model, names, null);
     if (e) rig.eyes.push(makeEntry(e));
+  });
+
+  // まぶたのモーフ（メッシュが複数に分かれていても全部に適用）
+  model.traverse(o => {
+    const dict = o.isMesh && o.morphTargetDictionary;
+    if (dict && G.eyelid.morph in dict) {
+      const i = dict[G.eyelid.morph];
+      morphs.push({ mesh: o, i, saved: o.morphTargetInfluences[i] || 0 });
+    }
   });
 
   // カメラを頭の正面に置く
@@ -255,16 +275,32 @@ function applyGaze(dt, now) {
   setWorldQuat(head.bone, headQ.clone().multiply(headOrig));
 
   // --- 目：今のカメラ位置を即座に見る ---
+  // 頭の今の「正面・上・右」。目の上下の動きをここから測る
+  const hq = head.bone.getWorldQuaternion(new THREE.Quaternion());
+  const hf = head.axis.clone().applyQuaternion(hq).normalize();
+  const hu = head.up.clone().applyQuaternion(hq).normalize();
+  const hr = new THREE.Vector3().crossVectors(hu, hf).normalize();
+  const pitchOf = v => Math.atan2(v.dot(hu), Math.hypot(v.dot(hf), v.dot(hr)));
+  let upSum = 0;
   eyes.forEach(e => {
     const eo = e.bone.getWorldQuaternion(new THREE.Quaternion());
     e.bone.getWorldPosition(_p);
     _f.copy(e.axis).applyQuaternion(eo).normalize();
+    const pitchBefore = pitchOf(_f);
     _t.copy(camera.position).sub(_p).normalize();
     limitedRotation(_f, _t, G.eyeMaxDeg * DEG, _lim);
     e.q.slerp(_lim, 1 - Math.exp(-G.eyeSmoothing * dt));
     setWorldQuat(e.bone, e.q.clone().multiply(eo));
+    const after = e.axis.clone().applyQuaternion(e.bone.getWorldQuaternion(new THREE.Quaternion())).normalize();
+    upSum += pitchOf(after) - pitchBefore;      // 正の値 = 目が上へ動いた量
   });
   stat.eyeDeg = eyes.length ? 2 * Math.acos(Math.min(1, Math.abs(eyes[0].q.w))) / DEG : 0;
+  stat.eyeUpDeg = eyes.length ? upSum / eyes.length / DEG : 0;
+
+  // --- 上まぶた：目が startDeg 以上上を向いたら、fullDeg に向けて段階的に ---
+  const L = G.eyelid;
+  const lidTarget = THREE.MathUtils.clamp((stat.eyeUpDeg - L.startDeg) / (L.fullDeg - L.startDeg), 0, 1);
+  lidValue += (lidTarget - lidValue) * (1 - Math.exp(-L.smoothing * dt));
 }
 
 /* ---------- メインループ ---------- */
@@ -277,9 +313,14 @@ renderer.setAnimationLoop(() => {
   while (history.length > 1 && history[0].t < now - 2) history.shift();
 
   allEntries().forEach(e => e.bone.quaternion.copy(e.saved));   // ① 補正を戻す
+  morphs.forEach(m => { m.mesh.morphTargetInfluences[m.i] = m.saved; });
   if (mixer) mixer.update(dt);                                  // ② アニメ更新
   allEntries().forEach(e => e.saved.copy(e.bone.quaternion));   // ③ 補正前を保存
-  applyGaze(dt, now);                                           // ④ 目線補正
+  morphs.forEach(m => { m.saved = m.mesh.morphTargetInfluences[m.i]; });
+  applyGaze(dt, now);                                           // ④ 目線補正＋まぶた計算
+  morphs.forEach(m => {                                         // ⑤ まぶたのモーフを適用
+    m.mesh.morphTargetInfluences[m.i] = Math.min(1, m.saved + lidValue);
+  });
   renderer.render(scene, camera);
 
   if (rig.head) {
@@ -290,6 +331,8 @@ renderer.setAnimationLoop(() => {
       `待機アニメ: ${info.clip === "なし" ? "なし（standが見つかりません。glbに入れるか SETTINGS.idle.file を指定）" : info.clip}\n` +
       `目: ${stat.eyeDeg.toFixed(1)}° / 頭: ${headDeg.toFixed(1)}° / 首: ${neckDeg.toFixed(1)}°` +
       (stat.clamped ? `（頭＋首が上限で制限中：左右${G.maxYawDeg}°・上下${G.maxPitchDeg}°）` : "") + "\n" +
+      `目の上向き: ${stat.eyeUpDeg.toFixed(1)}° / 上まぶた: ${(lidValue * 100).toFixed(0)}%` +
+      (morphs.length ? "" : `（モーフ「${G.eyelid.morph}」が見つかりません）`) + "\n" +
       `使用ボーン: 首=${rig.neck ? rig.neck.bone.name : "なし"} 頭=${rig.head.bone.name} 目=${rig.eyes.length}個`;
   } else if (info.bones.length) {
     hud.textContent = "頭ボーンが見つかりません。下の骨名一覧を見て SETTINGS.gaze.bones を直してください。";
@@ -301,6 +344,7 @@ function buildSpecText() {
   return "【SETTINGS（これをSwiftに移植）】\n" + JSON.stringify(SETTINGS, null, 2) +
     "\n\n【検出結果】\nクリップ: " + (info.clips.join(", ") || "なし") +
     "\n再生中の待機アニメ: " + info.clip +
+    "\nまぶたのモーフ: " + (morphs.length ? G.eyelid.morph + "（" + morphs.length + "メッシュ）" : "見つからない") +
     "\n使用ボーン: " + allEntries().map(e => e.bone.name).join(", ") +
     "\n骨名一覧: " + (info.bones.join(", ") || "なし") +
     "\n\n【動きの順序】目が見る → headDelaySec後に頭 → headOnlyDeg超過分は首 → 左右maxYawDeg・上下maxPitchDegまで" +
