@@ -49,6 +49,9 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
  *         stand に戻る。時間 t を自分で進める方式（t: 0〜長さ、向き dir: +1/-1/0）。
  *         t>0 の間は crouch の重み1・stand の重み0、t==0 で stand に戻す（0フレーム目は同じ姿勢）。
  *         途中でボタンを押すと、その場から向きだけが反転する。
+ *      ⑦ 瞬き: 間隔をランダムに空けて、閉じる→止まる→開くを滑らかな曲線で再生。
+ *         乱数で次の時刻を決めるだけの単純な状態機械（Swiftでも同じ式でblendShapeに入れる）。
+ *         値は「アニメ側の値 + 瞬き」(上限1)。
  *      ⑤ 目が上へ startDeg 以上向いたら、上まぶたのモーフを 0→1 へ段階的に上げる
  *         （上を向く角度 = 目の向きの「上方向成分」。頭の動きを引いた、目だけの動き）
  *         モーフの値は「アニメ側の値 + まぶた補正」(上限1)。Swiftでは blendShape の weight に同じ式を使う
@@ -74,6 +77,15 @@ const SETTINGS = {
       speed: 1,             // 再生速度（逆再生も同じ速さ）
       labels: { down: "しゃがむ", up: "立つ" },  // ボタンの表示
     },
+  },
+  blink: {
+    morph: "まばたき",       // シェイプキー（モーフ）名
+    intervalSec: [2.5, 6],   // 次の瞬きまでの間隔（この範囲でランダム）
+    closeSec: 0.07,          // 閉じる時間
+    holdSec: 0.03,           // 閉じたまま止まる時間
+    openSec: 0.12,           // 開く時間（閉じるより少しゆっくり）
+    doubleChance: 0.15,      // 続けて2回まばたきする確率
+    doubleGapSec: 0.18,      // 2回目までの間隔
   },
   gaze: {
     maxYawDeg: 15,         // 頭＋首の左右の上限
@@ -140,6 +152,8 @@ btn.addEventListener("click", () => {
   crouch.dir = crouch.down ? 1 : -1;     // 途中で押しても、その場から向きだけ反転
   btn.textContent = crouch.down ? A.labels.up : A.labels.down;
 });
+const blinkMorphs = [];   // 瞬きのモーフ
+const blink = { next: 2.0, t: -1 };   // next: 次の瞬き開始時刻 / t: 瞬き中の経過秒（-1=待機中）
 const morphs = [];        // まぶたのモーフ [{mesh, i, saved}]
 let lidValue = 0;         // 現在のまぶた補正 0〜1
 
@@ -226,13 +240,15 @@ new GLTFLoader().load(SETTINGS.model, gltf => {
   });
 
   // まぶたのモーフ（メッシュが複数に分かれていても全部に適用）
-  model.traverse(o => {
+  const collectMorph = (name, list) => model.traverse(o => {
     const dict = o.isMesh && o.morphTargetDictionary;
-    if (dict && G.eyelid.morph in dict) {
-      const i = dict[G.eyelid.morph];
-      morphs.push({ mesh: o, i, saved: o.morphTargetInfluences[i] || 0 });
+    if (dict && name in dict) {
+      const i = dict[name];
+      list.push({ mesh: o, i, saved: o.morphTargetInfluences[i] || 0 });
     }
   });
+  collectMorph(G.eyelid.morph, morphs);
+  collectMorph(SETTINGS.blink.morph, blinkMorphs);
 
   // カメラを頭の正面に置く
   const box = new THREE.Box3().setFromObject(model);
@@ -274,6 +290,30 @@ function delayedCameraPos(now, delay, out) {
   return out.copy(pick.pos);
 }
 const headQ = new THREE.Quaternion();
+
+// 瞬きの値(0〜1)を返す。間隔はランダム、たまに2回続けて瞬く
+function updateBlink(dt, now) {
+  const B = SETTINGS.blink;
+  if (blink.t < 0) {
+    if (now >= blink.next) blink.t = 0;
+    return 0;
+  }
+  blink.t += dt;
+  const hold = B.closeSec + B.holdSec;
+  let v;
+  if (blink.t < B.closeSec) v = blink.t / B.closeSec;
+  else if (blink.t < hold) v = 1;
+  else v = 1 - (blink.t - hold) / B.openSec;
+  if (blink.t >= hold + B.openSec) {           // 1回終了 → 次の時刻を決める
+    blink.t = -1;
+    v = 0;
+    blink.next = now + (Math.random() < B.doubleChance
+      ? B.doubleGapSec
+      : B.intervalSec[0] + Math.random() * (B.intervalSec[1] - B.intervalSec[0]));
+  }
+  v = THREE.MathUtils.clamp(v, 0, 1);
+  return v * v * (3 - 2 * v);                  // なめらかな曲線
+}
 
 function applyGaze(dt, now) {
   const { head, neck, eyes } = rig;
@@ -351,6 +391,7 @@ renderer.setAnimationLoop(() => {
 
   allEntries().forEach(e => e.bone.quaternion.copy(e.saved));   // ① 補正を戻す
   morphs.forEach(m => { m.mesh.morphTargetInfluences[m.i] = m.saved; });
+  blinkMorphs.forEach(m => { m.mesh.morphTargetInfluences[m.i] = m.saved; });
   if (crouch.action) {                                          // ⑥ しゃがみの時間を進める
     const A = SETTINGS.actions.crouch;
     if (crouch.dir !== 0) {
@@ -365,9 +406,14 @@ renderer.setAnimationLoop(() => {
   if (mixer) mixer.update(dt);                                  // ② アニメ更新
   allEntries().forEach(e => e.saved.copy(e.bone.quaternion));   // ③ 補正前を保存
   morphs.forEach(m => { m.saved = m.mesh.morphTargetInfluences[m.i]; });
+  blinkMorphs.forEach(m => { m.saved = m.mesh.morphTargetInfluences[m.i]; });
   applyGaze(dt, now);                                           // ④ 目線補正＋まぶた計算
   morphs.forEach(m => {                                         // ⑤ まぶたのモーフを適用
     m.mesh.morphTargetInfluences[m.i] = Math.min(1, m.saved + lidValue);
+  });
+  const blinkValue = updateBlink(dt, now);                      // ⑦ 瞬き
+  blinkMorphs.forEach(m => {
+    m.mesh.morphTargetInfluences[m.i] = Math.min(1, m.saved + blinkValue);
   });
   renderer.render(scene, camera);
 
@@ -394,6 +440,7 @@ function buildSpecText() {
   return "【SETTINGS（これをSwiftに移植）】\n" + JSON.stringify(SETTINGS, null, 2) +
     "\n\n【検出結果】\nクリップ: " + (info.clips.join(", ") || "なし") +
     "\n再生中の待機アニメ: " + info.clip +
+    "\n瞬きのモーフ: " + (blinkMorphs.length ? SETTINGS.blink.morph + "（" + blinkMorphs.length + "メッシュ）" : "見つからない") +
     "\nまぶたのモーフ: " + (morphs.length ? G.eyelid.morph + "（" + morphs.length + "メッシュ）" : "見つからない") +
     "\n使用ボーン: " + allEntries().map(e => e.bone.name).join(", ") +
     "\n骨名一覧: " + (info.bones.join(", ") || "なし") +
