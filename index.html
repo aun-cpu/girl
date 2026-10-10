@@ -8,6 +8,8 @@
   html, body { margin: 0; height: 100%; background: #111; color: #eee; font: 12px/1.5 sans-serif; overflow: hidden; }
   canvas { display: block; width: 100%; height: 100%; touch-action: none; }
   #hud { position: fixed; left: 8px; top: 8px; right: 8px; pointer-events: none; text-shadow: 0 0 3px #000; white-space: pre-wrap; }
+  #crouchBtn { position: fixed; left: 50%; transform: translateX(-50%); bottom: 64px; padding: 12px 28px; font-size: 16px; border: 0; border-radius: 24px; background: #4a7cff; color: #fff; }
+  #crouchBtn:active { background: #3a63cc; }
   #spec { position: fixed; left: 8px; right: 8px; bottom: 8px; background: rgba(0,0,0,.7); border-radius: 8px; padding: 6px 10px; max-height: 45%; overflow: auto; }
   #spec summary { cursor: pointer; font-weight: bold; }
   #spec pre { white-space: pre-wrap; margin: 6px 0 0; font-size: 11px; }
@@ -21,6 +23,7 @@
 </head>
 <body>
 <div id="hud">読み込み中…</div>
+<button id="crouchBtn" hidden>しゃがむ</button>
 <details id="spec"><summary>設定 / Swift移植メモ</summary><pre id="specText"></pre></details>
 
 <script type="module">
@@ -42,6 +45,10 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
  *      ③ 頭の回転が headOnlyDeg を超えた分は、首が回して分担する
  *      ④ 頭＋首は左右 maxYawDeg・上下 maxPitchDeg まで。それ以上は目だけが追う
  *         （上下左右は「頭の正面・上・右」の3軸に分けて別々に制限する）
+ *      ⑥ ボタンで crouch を最後のフレームまで再生して止め、もう一度押すと逆再生で
+ *         stand に戻る。時間 t を自分で進める方式（t: 0〜長さ、向き dir: +1/-1/0）。
+ *         t>0 の間は crouch の重み1・stand の重み0、t==0 で stand に戻す（0フレーム目は同じ姿勢）。
+ *         途中でボタンを押すと、その場から向きだけが反転する。
  *      ⑤ 目が上へ startDeg 以上向いたら、上まぶたのモーフを 0→1 へ段階的に上げる
  *         （上を向く角度 = 目の向きの「上方向成分」。頭の動きを引いた、目だけの動き）
  *         モーフの値は「アニメ側の値 + まぶた補正」(上限1)。Swiftでは blendShape の weight に同じ式を使う
@@ -60,6 +67,13 @@ const SETTINGS = {
     file: "",                      // standが別のglbにあるときそのファイル名（例: "stand.glb"）。空ならgirl.glb内を探す
     fallbackToFirstClip: true,     // 見つからなければ最初のクリップ
     loopForever: true,             // 1フレームだけのポーズでも止めずに流し続ける
+  },
+  actions: {
+    crouch: {
+      clipName: "crouch",   // しゃがむアニメ（0フレーム目 = standと同じポーズ）
+      speed: 1,             // 再生速度（逆再生も同じ速さ）
+      labels: { down: "しゃがむ", up: "立つ" },  // ボタンの表示
+    },
   },
   gaze: {
     maxYawDeg: 15,         // 頭＋首の左右の上限
@@ -118,6 +132,14 @@ const info = { clip: "なし", clips: [], bones: [] };
 const clock = new THREE.Clock();
 const history = [];                                // カメラ位置の履歴（頭の遅れ用）
 const stat = { total: 0, eyeDeg: 0, eyeUpDeg: 0, clamped: false };
+const crouch = { action: null, stand: null, dur: 0, t: 0, dir: 0, down: false };
+const btn = document.getElementById("crouchBtn");
+btn.addEventListener("click", () => {
+  const A = SETTINGS.actions.crouch;
+  crouch.down = !crouch.down;            // 押すたびに「しゃがむ」⇔「立つ」
+  crouch.dir = crouch.down ? 1 : -1;     // 途中で押しても、その場から向きだけ反転
+  btn.textContent = crouch.down ? A.labels.up : A.labels.down;
+});
 const morphs = [];        // まぶたのモーフ [{mesh, i, saved}]
 let lidValue = 0;         // 現在のまぶた補正 0〜1
 
@@ -170,6 +192,21 @@ new GLTFLoader().load(SETTINGS.model, gltf => {
     action.clampWhenFinished = true;
     action.play();
     info.clip = clip.name;
+
+    // しゃがみ（時間tを自分で進めるため、一時停止状態で姿勢だけ評価させる）
+    const A = SETTINGS.actions.crouch;
+    const cc = clips.find(a => a.name.toLowerCase() === A.clipName.toLowerCase());
+    if (cc) {
+      if (cc.duration <= 0) cc.duration = 1;
+      crouch.stand = action;
+      crouch.action = mixer.clipAction(cc);
+      crouch.dur = cc.duration;
+      crouch.action.play();
+      crouch.action.paused = true;
+      crouch.action.setEffectiveWeight(0);
+      btn.hidden = false;
+      btn.textContent = A.labels.down;
+    }
     specText.textContent = buildSpecText();
   }
   if (SETTINGS.idle.file) {
@@ -314,6 +351,17 @@ renderer.setAnimationLoop(() => {
 
   allEntries().forEach(e => e.bone.quaternion.copy(e.saved));   // ① 補正を戻す
   morphs.forEach(m => { m.mesh.morphTargetInfluences[m.i] = m.saved; });
+  if (crouch.action) {                                          // ⑥ しゃがみの時間を進める
+    const A = SETTINGS.actions.crouch;
+    if (crouch.dir !== 0) {
+      crouch.t = THREE.MathUtils.clamp(crouch.t + crouch.dir * dt * A.speed, 0, crouch.dur);
+      if (crouch.t === crouch.dur || crouch.t === 0) crouch.dir = 0;   // 端で止まる
+    }
+    const on = crouch.t > 0 ? 1 : 0;      // t==0 は stand と同じ姿勢なので stand に戻す
+    crouch.action.time = crouch.t;
+    crouch.action.setEffectiveWeight(on);
+    crouch.stand.setEffectiveWeight(1 - on);
+  }
   if (mixer) mixer.update(dt);                                  // ② アニメ更新
   allEntries().forEach(e => e.saved.copy(e.bone.quaternion));   // ③ 補正前を保存
   morphs.forEach(m => { m.saved = m.mesh.morphTargetInfluences[m.i]; });
@@ -331,6 +379,8 @@ renderer.setAnimationLoop(() => {
       `待機アニメ: ${info.clip === "なし" ? "なし（standが見つかりません。glbに入れるか SETTINGS.idle.file を指定）" : info.clip}\n` +
       `目: ${stat.eyeDeg.toFixed(1)}° / 頭: ${headDeg.toFixed(1)}° / 首: ${neckDeg.toFixed(1)}°` +
       (stat.clamped ? `（頭＋首が上限で制限中：左右${G.maxYawDeg}°・上下${G.maxPitchDeg}°）` : "") + "\n" +
+      (crouch.action ? `しゃがみ: ${(crouch.t / crouch.dur * 100).toFixed(0)}%` +
+        (crouch.dir > 0 ? "（しゃがみ中）" : crouch.dir < 0 ? "（立ち上がり中）" : crouch.t > 0 ? "（維持）" : "") + "\n" : "") +
       `目の上向き: ${stat.eyeUpDeg.toFixed(1)}° / 上まぶた: ${(lidValue * 100).toFixed(0)}%` +
       (morphs.length ? "" : `（モーフ「${G.eyelid.morph}」が見つかりません）`) + "\n" +
       `使用ボーン: 首=${rig.neck ? rig.neck.bone.name : "なし"} 頭=${rig.head.bone.name} 目=${rig.eyes.length}個`;
