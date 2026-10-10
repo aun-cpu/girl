@@ -9,6 +9,8 @@
   canvas { display: block; width: 100%; height: 100%; touch-action: none; }
   #hud { position: fixed; left: 8px; top: 8px; right: 8px; pointer-events: none; text-shadow: 0 0 3px #000; white-space: pre-wrap; }
   #crouchBtn { position: fixed; left: 50%; transform: translateX(-50%); bottom: 64px; padding: 12px 28px; font-size: 16px; border: 0; border-radius: 24px; background: #4a7cff; color: #fff; }
+  #maskBtn { position: fixed; left: 50%; transform: translateX(-50%); bottom: 116px; padding: 12px 28px; font-size: 16px; border: 0; border-radius: 24px; background: #2f9e75; color: #fff; }
+  #maskBtn:disabled { background: #666; }
   #crouchBtn:active { background: #3a63cc; }
   #spec { position: fixed; left: 8px; right: 8px; bottom: 8px; background: rgba(0,0,0,.7); border-radius: 8px; padding: 6px 10px; max-height: 45%; overflow: auto; }
   #spec summary { cursor: pointer; font-weight: bold; }
@@ -23,6 +25,7 @@
 </head>
 <body>
 <div id="hud">読み込み中…</div>
+<button id="maskBtn" hidden>マスクを上げる</button>
 <button id="crouchBtn" hidden>しゃがむ</button>
 <details id="spec"><summary>設定 / Swift移植メモ</summary><pre id="specText"></pre></details>
 
@@ -55,6 +58,11 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
  *      ⑧ 呼吸: 胸・肩の骨をごく小さく往復させる（吸う0.4:吐く0.6、周期は毎回ゆらぐ）。
  *         アニメの姿勢の「上に足す」回転なので、standやcrouchと一緒に使える。
  *         各ボーンの回転軸は、初期姿勢のワールドの「右」「正面」からボーンのローカルへ変換して求める。
+ *      ⑨ マスクを上げる: アニメに無い動きなので、腕を「2ボーンIK」で動かす。
+ *         手首の目標位置を頭の座標（正面・上・横）で決め、肩→ひじ→手首の長さから
+ *         ひじの位置を解析的に求め、各ボーンを「今の向き→求めた向き」へ回す。
+ *         順序: 手を上げる → 手が着いたらモーフ0→1 → 少し止める → 手を下ろす。
+ *         IKは目線補正の「後」に行う（頭が動いた後の位置へ手を持っていくため）。
  *      ⑤ 目が上へ startDeg 以上向いたら、上まぶたのモーフを 0→1 へ段階的に上げる
  *         （上を向く角度 = 目の向きの「上方向成分」。頭の動きを引いた、目だけの動き）
  *         モーフの値は「アニメ側の値 + まぶた補正」(上限1)。Swiftでは blendShape の weight に同じ式を使う
@@ -79,6 +87,24 @@ const SETTINGS = {
       clipName: "crouch",   // しゃがむアニメ（0フレーム目 = standと同じポーズ）
       speed: 1,             // 再生速度（逆再生も同じ速さ）
       labels: { down: "しゃがむ", up: "立つ" },  // ボタンの表示
+    },
+  },
+  maskUp: {
+    hand: "R",                  // 使う手（"R" か "L"）
+    morph: "鼻マスク化",        // 手が顔に着いてから 0→1 にするモーフ
+    raiseSec: 0.6,              // 手を顔の前へ上げる時間
+    morphSec: 0.35,             // モーフを動かす時間
+    holdSec: 0.3,               // 動かした後に手を止める時間
+    lowerSec: 0.6,              // 手を下ろす時間
+    target:  { forward: 0.14, up: -0.01, side: 0.03 }, // 手首の位置（頭の座標。m。sideは手の側へ）
+    fingerAim: { forward: 0.07, up: 0.04 },            // 指先が向く点（鼻のあたり）
+    elbowHint: { down: 1.0, out: 0.6, back: 0.3 },     // ひじが向く方向（下・外・後ろ）
+    labels: { up: "マスクを上げる", down: "マスクを下ろす" },
+    arms: {                     // 骨名の候補（three.jsは「.」を消すので両方）
+      R: { shoulder: ["腕.R", "腕R"], elbow: ["ひじ.R", "ひじR"], wrist: ["手首.R", "手首R"],
+           finger: ["中指１.R", "中指１R", "人指１.R", "人指１R"] },
+      L: { shoulder: ["腕.L", "腕L"], elbow: ["ひじ.L", "ひじL"], wrist: ["手首.L", "手首L"],
+           finger: ["中指１.L", "中指１L", "人指１.L", "人指１L"] },
     },
   },
   blink: {
@@ -166,6 +192,21 @@ btn.addEventListener("click", () => {
   crouch.down = !crouch.down;            // 押すたびに「しゃがむ」⇔「立つ」
   crouch.dir = crouch.down ? 1 : -1;     // 途中で押しても、その場から向きだけ反転
   btn.textContent = crouch.down ? A.labels.up : A.labels.down;
+});
+const armEntries = [];    // マスクの腕 [肩, ひじ, 手首]
+let fingerBone = null;    // 手の向きの基準（中指の付け根）
+const maskMorphs = [];    // マスクのモーフ
+const mask = { phase: "idle", t: 0, on: false, value: 0, from: 0, to: 0 };
+const maskBtn = document.getElementById("maskBtn");
+maskBtn.addEventListener("click", () => {
+  if (mask.phase !== "idle") return;
+  mask.on = !mask.on;                    // 押すたびに「上げる」⇔「下ろす」
+  mask.from = mask.value;
+  mask.to = mask.on ? 1 : 0;
+  mask.phase = "raise"; mask.t = 0;
+  maskBtn.disabled = true;
+  const L = SETTINGS.maskUp.labels;
+  maskBtn.textContent = mask.on ? L.down : L.up;
 });
 const breathBones = [];   // 呼吸で動かす骨 [{e, axis, deg}]
 const breath = { phase: 0, period: 4 };
@@ -257,6 +298,19 @@ new GLTFLoader().load(SETTINGS.model, gltf => {
     if (e) rig.eyes.push(makeEntry(e));
   });
 
+  // マスクの腕
+  {
+    const M = SETTINGS.maskUp, names = M.arms[M.hand];
+    const sh = findBone(model, names.shoulder, null), el = findBone(model, names.elbow, null);
+    const wr = findBone(model, names.wrist, null);
+    fingerBone = findBone(model, names.finger, null);
+    if (sh && el && wr && fingerBone) {
+      armEntries.push(makeEntry(sh), makeEntry(el), makeEntry(wr));
+      maskBtn.hidden = false;
+      maskBtn.textContent = M.labels.up;
+    }
+  }
+
   // 呼吸で動かす骨
   SETTINGS.breath.bones.forEach(c => {
     const b = findBone(model, c.names, null);
@@ -276,6 +330,7 @@ new GLTFLoader().load(SETTINGS.model, gltf => {
   });
   collectMorph(G.eyelid.morph, morphs);
   collectMorph(SETTINGS.blink.morph, blinkMorphs);
+  collectMorph(SETTINGS.maskUp.morph, maskMorphs);
 
   // カメラを頭の正面に置く
   const box = new THREE.Box3().setFromObject(model);
@@ -317,6 +372,80 @@ function delayedCameraPos(now, delay, out) {
   return out.copy(pick.pos);
 }
 const headQ = new THREE.Quaternion();
+
+// ---- マスクを上げる ----
+const smooth01 = x => { x = THREE.MathUtils.clamp(x, 0, 1); return x * x * (3 - 2 * x); };
+// 手の上げ具合 w(0〜1) を返しつつ、モーフの値 mask.value も進める
+function updateMask(dt) {
+  const M = SETTINGS.maskUp;
+  if (mask.phase === "idle") return 0;
+  mask.t += dt;
+  let w = 0;
+  if (mask.phase === "raise") {
+    w = mask.t / M.raiseSec;
+    if (mask.t >= M.raiseSec) { mask.phase = "morph"; mask.t = 0; w = 1; }
+  } else if (mask.phase === "morph") {
+    w = 1;
+    mask.value = mask.from + (mask.to - mask.from) * smooth01(mask.t / M.morphSec);
+    if (mask.t >= M.morphSec) { mask.value = mask.to; mask.phase = "hold"; mask.t = 0; }
+  } else if (mask.phase === "hold") {
+    w = 1;
+    if (mask.t >= M.holdSec) { mask.phase = "lower"; mask.t = 0; }
+  } else if (mask.phase === "lower") {
+    w = 1 - mask.t / M.lowerSec;
+    if (mask.t >= M.lowerSec) { mask.phase = "idle"; mask.t = 0; w = 0; maskBtn.disabled = false; }
+  }
+  return THREE.MathUtils.clamp(w, 0, 1);
+}
+// ボーンの向きを「from方向→to方向」へ回す（ねじりは変えない）。ratio<1なら途中まで
+function swingBone(bone, from, to, ratio = 1) {
+  const full = new THREE.Quaternion().setFromUnitVectors(from.clone().normalize(), to.clone().normalize());
+  const q = new THREE.Quaternion().slerp(full, ratio);
+  setWorldQuat(bone, q.multiply(bone.getWorldQuaternion(new THREE.Quaternion())));
+}
+// 2ボーンIK: 手首を顔の前へ。wは上げ具合（0=今の姿勢、1=顔の前）
+function applyMaskArm(w) {
+  if (w <= 0 || armEntries.length < 3 || !rig.head) return;
+  const M = SETTINGS.maskUp, [sh, el, wr] = armEntries.map(e => e.bone);
+  const P = b => b.getWorldPosition(new THREE.Vector3());
+  const S = P(sh), E = P(el), W = P(wr);
+  const L1 = S.distanceTo(E), L2 = E.distanceTo(W);
+
+  // 頭の「正面・上・横」
+  const hq = rig.head.bone.getWorldQuaternion(new THREE.Quaternion());
+  const f = rig.head.axis.clone().applyQuaternion(hq).normalize();
+  const u = rig.head.up.clone().applyQuaternion(hq).normalize();
+  const left = new THREE.Vector3().crossVectors(u, f).normalize();     // モデルの左（+X）
+  const side = M.hand === "R" ? left.clone().negate() : left;          // 手の側
+  const hp = P(rig.head.bone);
+  const T = hp.clone().addScaledVector(f, M.target.forward).addScaledVector(u, M.target.up).addScaledVector(side, M.target.side);
+  const nose = hp.clone().addScaledVector(f, M.fingerAim.forward).addScaledVector(u, M.fingerAim.up);
+
+  const e = smooth01(w);
+  const Tw = W.clone().lerp(T, e);                                     // 今の手首 → 顔の前
+  // ひじの向き: 今のひじの向き → 下・外・後ろ
+  const hint = new THREE.Vector3(0, -M.elbowHint.down, 0)
+    .addScaledVector(side, M.elbowHint.out).addScaledVector(f, -M.elbowHint.back).normalize();
+  const pole = E.clone().sub(S).normalize().lerp(hint, e).normalize();
+
+  // 解析的な2ボーンIK
+  const toT = Tw.clone().sub(S);
+  const dir = toT.clone().normalize();
+  const d = THREE.MathUtils.clamp(toT.length(), Math.abs(L1 - L2) + 1e-4, L1 + L2 - 1e-4);
+  const a = (L1 * L1 - L2 * L2 + d * d) / (2 * d);
+  const h = Math.sqrt(Math.max(0, L1 * L1 - a * a));
+  let perp = pole.clone().addScaledVector(dir, -pole.dot(dir));
+  if (perp.lengthSq() < 1e-6) perp = new THREE.Vector3(0, -1, 0).addScaledVector(dir, dir.y);
+  perp.normalize();
+  const Enew = S.clone().addScaledVector(dir, a).addScaledVector(perp, h);
+  const Wnew = S.clone().addScaledVector(dir, d);
+
+  swingBone(sh, E.clone().sub(S), Enew.clone().sub(S));                // 肩（腕）
+  const E2 = P(el), W2 = P(wr);
+  swingBone(el, W2.clone().sub(E2), Wnew.clone().sub(E2));             // ひじ
+  const W3 = P(wr), F3 = P(fingerBone);                                // 手首：指先を鼻の方へ
+  swingBone(wr, F3.clone().sub(W3), nose.clone().sub(Wnew), e);
+}
 
 // 呼吸の値(-1〜1)。吸う→吐くを滑らかな曲線でつなぐ。周期は毎回ゆらぐ
 function breathValue(dt) {
@@ -440,8 +569,10 @@ renderer.setAnimationLoop(() => {
 
   allEntries().forEach(e => e.bone.quaternion.copy(e.saved));   // ① 補正を戻す
   breathBones.forEach(b => b.e.bone.quaternion.copy(b.e.saved));
+  armEntries.forEach(e => e.bone.quaternion.copy(e.saved));
   morphs.forEach(m => { m.mesh.morphTargetInfluences[m.i] = m.saved; });
   blinkMorphs.forEach(m => { m.mesh.morphTargetInfluences[m.i] = m.saved; });
+  maskMorphs.forEach(m => { m.mesh.morphTargetInfluences[m.i] = m.saved; });
   if (crouch.action) {                                          // ⑥ しゃがみの時間を進める
     const A = SETTINGS.actions.crouch;
     if (crouch.dir !== 0) {
@@ -456,16 +587,22 @@ renderer.setAnimationLoop(() => {
   if (mixer) mixer.update(dt);                                  // ② アニメ更新
   allEntries().forEach(e => e.saved.copy(e.bone.quaternion));   // ③ 補正前を保存
   breathBones.forEach(b => b.e.saved.copy(b.e.bone.quaternion));
+  armEntries.forEach(e => e.saved.copy(e.bone.quaternion));
   applyBreath(dt);                                              // ⑧ 呼吸（目線より先に。頭の位置に反映される）
   morphs.forEach(m => { m.saved = m.mesh.morphTargetInfluences[m.i]; });
   blinkMorphs.forEach(m => { m.saved = m.mesh.morphTargetInfluences[m.i]; });
+  maskMorphs.forEach(m => { m.saved = m.mesh.morphTargetInfluences[m.i]; });
   applyGaze(dt, now);                                           // ④ 目線補正＋まぶた計算
+  applyMaskArm(updateMask(dt));                                 // ⑨ マスクを上げる腕（目線の後）
   morphs.forEach(m => {                                         // ⑤ まぶたのモーフを適用
     m.mesh.morphTargetInfluences[m.i] = Math.min(1, m.saved + lidValue);
   });
   const blinkValue = updateBlink(dt, now);                      // ⑦ 瞬き
   blinkMorphs.forEach(m => {
     m.mesh.morphTargetInfluences[m.i] = Math.min(1, m.saved + blinkValue);
+  });
+  maskMorphs.forEach(m => {                                     // マスクのモーフ（手が着いた後に0→1）
+    m.mesh.morphTargetInfluences[m.i] = Math.min(1, m.saved + mask.value);
   });
   renderer.render(scene, camera);
 
@@ -492,6 +629,8 @@ function buildSpecText() {
   return "【SETTINGS（これをSwiftに移植）】\n" + JSON.stringify(SETTINGS, null, 2) +
     "\n\n【検出結果】\nクリップ: " + (info.clips.join(", ") || "なし") +
     "\n再生中の待機アニメ: " + info.clip +
+    "\nマスクの腕: " + (armEntries.map(e => e.bone.name).join(", ") || "見つからない") +
+    "\nマスクのモーフ: " + (maskMorphs.length ? SETTINGS.maskUp.morph : "見つからない") +
     "\n呼吸の骨: " + (breathBones.map(b => b.e.bone.name).join(", ") || "見つからない") +
     "\n瞬きのモーフ: " + (blinkMorphs.length ? SETTINGS.blink.morph + "（" + blinkMorphs.length + "メッシュ）" : "見つからない") +
     "\nまぶたのモーフ: " + (morphs.length ? G.eyelid.morph + "（" + morphs.length + "メッシュ）" : "見つからない") +
