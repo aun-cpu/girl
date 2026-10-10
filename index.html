@@ -53,8 +53,10 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 const SETTINGS = {
   model: "girl.glb",
   idle: {
-    clipNames: ["idle", "Idle", "待機", "Standing"], // この順で探す
-    fallbackToFirstClip: true,                       // 無ければ最初のクリップ
+    clipNames: ["stand", "スタンド", "立ち", "idle", "待機", "standing"], // この順で探す（大文字小文字は区別しない）
+    file: "",                      // standが別のglbにあるときそのファイル名（例: "stand.glb"）。空ならgirl.glb内を探す
+    fallbackToFirstClip: true,     // 見つからなければ最初のクリップ
+    loopForever: true,             // 1フレームだけのポーズでも止めずに流し続ける
   },
   gaze: {
     maxYawDeg: 15,         // 頭＋首の左右の上限
@@ -138,15 +140,32 @@ new GLTFLoader().load(SETTINGS.model, gltf => {
   model.traverse(o => { if (o.isBone) info.bones.push(o.name); });
   info.clips = gltf.animations.map(a => a.name);
 
-  if (gltf.animations.length) {
-    mixer = new THREE.AnimationMixer(model);
+  // 待機アニメーション（stand）
+  function startIdle(clips) {
+    info.clips = clips.map(a => a.name);
+    if (!clips.length) { specText.textContent = buildSpecText(); return; }
     let clip = null;
     for (const n of SETTINGS.idle.clipNames) {
-      clip = gltf.animations.find(a => a.name === n);
+      clip = clips.find(a => a.name.toLowerCase() === n.toLowerCase());
       if (clip) break;
     }
-    if (!clip && SETTINGS.idle.fallbackToFirstClip) clip = gltf.animations[0];
-    if (clip) { mixer.clipAction(clip).play(); info.clip = clip.name; }
+    if (!clip && SETTINGS.idle.fallbackToFirstClip) clip = clips[0];
+    if (!clip) { specText.textContent = buildSpecText(); return; }
+    // 1フレームだけのクリップは長さが0になり、ループが壊れるので長さを与える
+    if (clip.duration <= 0) clip.duration = 1;
+    mixer = new THREE.AnimationMixer(model);
+    const action = mixer.clipAction(clip);
+    action.setLoop(SETTINGS.idle.loopForever ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
+    action.clampWhenFinished = true;
+    action.play();
+    info.clip = clip.name;
+    specText.textContent = buildSpecText();
+  }
+  if (SETTINGS.idle.file) {
+    new GLTFLoader().load(SETTINGS.idle.file, g => startIdle(g.animations),
+      undefined, () => { hud.dataset.idleError = "1"; });
+  } else {
+    startIdle(gltf.animations);
   }
 
   const h = findBone(model, G.bones.head, "head");
@@ -268,7 +287,7 @@ renderer.setAnimationLoop(() => {
     const headDeg = Math.min(tot, G.headOnlyDeg);
     const neckDeg = Math.max(0, tot - G.headOnlyDeg);
     hud.textContent =
-      `クリップ: ${info.clip}\n` +
+      `待機アニメ: ${info.clip === "なし" ? "なし（standが見つかりません。glbに入れるか SETTINGS.idle.file を指定）" : info.clip}\n` +
       `目: ${stat.eyeDeg.toFixed(1)}° / 頭: ${headDeg.toFixed(1)}° / 首: ${neckDeg.toFixed(1)}°` +
       (stat.clamped ? `（頭＋首が上限で制限中：左右${G.maxYawDeg}°・上下${G.maxPitchDeg}°）` : "") + "\n" +
       `使用ボーン: 首=${rig.neck ? rig.neck.bone.name : "なし"} 頭=${rig.head.bone.name} 目=${rig.eyes.length}個`;
@@ -280,7 +299,8 @@ renderer.setAnimationLoop(() => {
 /* ---------- 画面内の仕様メモ ---------- */
 function buildSpecText() {
   return "【SETTINGS（これをSwiftに移植）】\n" + JSON.stringify(SETTINGS, null, 2) +
-    "\n\n【検出結果】\nクリップ: " + (info.clips.join(", ") || "なし（glbにアニメーション無し）") +
+    "\n\n【検出結果】\nクリップ: " + (info.clips.join(", ") || "なし") +
+    "\n再生中の待機アニメ: " + info.clip +
     "\n使用ボーン: " + allEntries().map(e => e.bone.name).join(", ") +
     "\n骨名一覧: " + (info.bones.join(", ") || "なし") +
     "\n\n【動きの順序】目が見る → headDelaySec後に頭 → headOnlyDeg超過分は首 → 左右maxYawDeg・上下maxPitchDegまで" +
