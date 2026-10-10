@@ -52,6 +52,9 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
  *      ⑦ 瞬き: 間隔をランダムに空けて、閉じる→止まる→開くを滑らかな曲線で再生。
  *         乱数で次の時刻を決めるだけの単純な状態機械（Swiftでも同じ式でblendShapeに入れる）。
  *         値は「アニメ側の値 + 瞬き」(上限1)。
+ *      ⑧ 呼吸: 胸・肩の骨をごく小さく往復させる（吸う0.4:吐く0.6、周期は毎回ゆらぐ）。
+ *         アニメの姿勢の「上に足す」回転なので、standやcrouchと一緒に使える。
+ *         各ボーンの回転軸は、初期姿勢のワールドの「右」「正面」からボーンのローカルへ変換して求める。
  *      ⑤ 目が上へ startDeg 以上向いたら、上まぶたのモーフを 0→1 へ段階的に上げる
  *         （上を向く角度 = 目の向きの「上方向成分」。頭の動きを引いた、目だけの動き）
  *         モーフの値は「アニメ側の値 + まぶた補正」(上限1)。Swiftでは blendShape の weight に同じ式を使う
@@ -86,6 +89,18 @@ const SETTINGS = {
     openSec: 0.12,           // 開く時間（閉じるより少しゆっくり）
     doubleChance: 0.15,      // 続けて2回まばたきする確率
     doubleGapSec: 0.18,      // 2回目までの間隔
+  },
+  breath: {
+    amount: 1.0,            // 全体の強さ（0で止める、2で2倍）
+    periodSec: 4.0,         // 1回の呼吸の長さ
+    variation: 0.15,        // 周期のゆらぎ（±15%）。毎回少しずつ変わる
+    inhaleRatio: 0.4,       // 1周期のうち「吸う」時間の割合（吐くほうが長い）
+    bones: [                // 吸うと胸が起き、肩が上がる。角度は振幅(度)
+      { names: ["上半身"],  pitchDeg: 0.5 },     // pitch: 胸の前後（右方向の軸まわり）
+      { names: ["上半身2"], pitchDeg: 1.0 },
+      { names: ["肩.L", "肩L"], rollDeg: 0.6 },  // roll: 肩の上下（正面方向の軸まわり）
+      { names: ["肩.R", "肩R"], rollDeg: -0.6 }, // 左右で符号が逆
+    ],
   },
   gaze: {
     maxYawDeg: 15,         // 頭＋首の左右の上限
@@ -152,6 +167,8 @@ btn.addEventListener("click", () => {
   crouch.dir = crouch.down ? 1 : -1;     // 途中で押しても、その場から向きだけ反転
   btn.textContent = crouch.down ? A.labels.up : A.labels.down;
 });
+const breathBones = [];   // 呼吸で動かす骨 [{e, axis, deg}]
+const breath = { phase: 0, period: 4 };
 const blinkMorphs = [];   // 瞬きのモーフ
 const blink = { next: 2.0, t: -1 };   // next: 次の瞬き開始時刻 / t: 瞬き中の経過秒（-1=待機中）
 const morphs = [];        // まぶたのモーフ [{mesh, i, saved}]
@@ -174,7 +191,8 @@ function makeEntry(bone) {
   const restQ = bone.getWorldQuaternion(new THREE.Quaternion());
   const axis = new THREE.Vector3(...G.forwardWorldAtRest).normalize().applyQuaternion(restQ.invert());
   const up = new THREE.Vector3(0, 1, 0).applyQuaternion(restQ);   // restQは反転済みなので「ローカルの上」
-  return { bone, axis, up, saved: bone.quaternion.clone(), q: new THREE.Quaternion() };
+  const right = new THREE.Vector3(1, 0, 0).applyQuaternion(restQ); // 同じく「ローカルの右」
+  return { bone, axis, up, right, saved: bone.quaternion.clone(), q: new THREE.Quaternion() };
 }
 const allEntries = () => [rig.neck, rig.head, ...rig.eyes].filter(Boolean);
 
@@ -239,6 +257,15 @@ new GLTFLoader().load(SETTINGS.model, gltf => {
     if (e) rig.eyes.push(makeEntry(e));
   });
 
+  // 呼吸で動かす骨
+  SETTINGS.breath.bones.forEach(c => {
+    const b = findBone(model, c.names, null);
+    if (!b) return;
+    const e = makeEntry(b);
+    breathBones.push({ e, axis: c.pitchDeg !== undefined ? e.right : e.axis, deg: c.pitchDeg ?? c.rollDeg });
+  });
+  breath.period = SETTINGS.breath.periodSec;
+
   // まぶたのモーフ（メッシュが複数に分かれていても全部に適用）
   const collectMorph = (name, list) => model.traverse(o => {
     const dict = o.isMesh && o.morphTargetDictionary;
@@ -290,6 +317,28 @@ function delayedCameraPos(now, delay, out) {
   return out.copy(pick.pos);
 }
 const headQ = new THREE.Quaternion();
+
+// 呼吸の値(-1〜1)。吸う→吐くを滑らかな曲線でつなぐ。周期は毎回ゆらぐ
+function breathValue(dt) {
+  const B = SETTINGS.breath;
+  breath.phase += dt / breath.period;
+  if (breath.phase >= 1) {
+    breath.phase -= 1;
+    breath.period = B.periodSec * (1 + (Math.random() * 2 - 1) * B.variation);
+  }
+  const p = breath.phase, r = B.inhaleRatio;
+  const v = p < r ? 0.5 - 0.5 * Math.cos(Math.PI * p / r)
+                  : 0.5 + 0.5 * Math.cos(Math.PI * (p - r) / (1 - r));
+  return (v - 0.5) * 2;
+}
+const _bq = new THREE.Quaternion();
+function applyBreath(dt) {
+  const k = breathValue(dt) * SETTINGS.breath.amount;
+  breathBones.forEach(b => {
+    _bq.setFromAxisAngle(b.axis, b.deg * DEG * k);
+    b.e.bone.quaternion.copy(b.e.saved).multiply(_bq);   // アニメの姿勢の上に足す
+  });
+}
 
 // 瞬きの値(0〜1)を返す。間隔はランダム、たまに2回続けて瞬く
 function updateBlink(dt, now) {
@@ -390,6 +439,7 @@ renderer.setAnimationLoop(() => {
   while (history.length > 1 && history[0].t < now - 2) history.shift();
 
   allEntries().forEach(e => e.bone.quaternion.copy(e.saved));   // ① 補正を戻す
+  breathBones.forEach(b => b.e.bone.quaternion.copy(b.e.saved));
   morphs.forEach(m => { m.mesh.morphTargetInfluences[m.i] = m.saved; });
   blinkMorphs.forEach(m => { m.mesh.morphTargetInfluences[m.i] = m.saved; });
   if (crouch.action) {                                          // ⑥ しゃがみの時間を進める
@@ -405,6 +455,8 @@ renderer.setAnimationLoop(() => {
   }
   if (mixer) mixer.update(dt);                                  // ② アニメ更新
   allEntries().forEach(e => e.saved.copy(e.bone.quaternion));   // ③ 補正前を保存
+  breathBones.forEach(b => b.e.saved.copy(b.e.bone.quaternion));
+  applyBreath(dt);                                              // ⑧ 呼吸（目線より先に。頭の位置に反映される）
   morphs.forEach(m => { m.saved = m.mesh.morphTargetInfluences[m.i]; });
   blinkMorphs.forEach(m => { m.saved = m.mesh.morphTargetInfluences[m.i]; });
   applyGaze(dt, now);                                           // ④ 目線補正＋まぶた計算
@@ -440,6 +492,7 @@ function buildSpecText() {
   return "【SETTINGS（これをSwiftに移植）】\n" + JSON.stringify(SETTINGS, null, 2) +
     "\n\n【検出結果】\nクリップ: " + (info.clips.join(", ") || "なし") +
     "\n再生中の待機アニメ: " + info.clip +
+    "\n呼吸の骨: " + (breathBones.map(b => b.e.bone.name).join(", ") || "見つからない") +
     "\n瞬きのモーフ: " + (blinkMorphs.length ? SETTINGS.blink.morph + "（" + blinkMorphs.length + "メッシュ）" : "見つからない") +
     "\nまぶたのモーフ: " + (morphs.length ? G.eyelid.morph + "（" + morphs.length + "メッシュ）" : "見つからない") +
     "\n使用ボーン: " + allEntries().map(e => e.bone.name).join(", ") +
