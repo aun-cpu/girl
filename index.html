@@ -25,7 +25,7 @@
 </head>
 <body>
 <div id="hud">読み込み中…</div>
-<button id="maskBtn" hidden>マスクを上げる</button>
+<button id="maskBtn" hidden>口を開ける</button>
 <button id="crouchBtn" hidden>しゃがむ</button>
 <details id="spec"><summary>設定 / Swift移植メモ</summary><pre id="specText"></pre></details>
 
@@ -58,10 +58,12 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
  *      ⑧ 呼吸: 胸・肩の骨をごく小さく往復させる（吸う0.4:吐く0.6、周期は毎回ゆらぐ）。
  *         アニメの姿勢の「上に足す」回転なので、standやcrouchと一緒に使える。
  *         各ボーンの回転軸は、初期姿勢のワールドの「右」「正面」からボーンのローカルへ変換して求める。
- *      ⑨ マスクを上げる: アニメに無い動きなので、腕を「2ボーンIK」で動かす。
+ *      ⑨ 口を開ける（手でマスクを上げる）: アニメに無い動きなので、腕を「2ボーンIK」で動かす。
  *         手首の目標位置を頭の座標（正面・上・横）で決め、肩→ひじ→手首の長さから
  *         ひじの位置を解析的に求め、各ボーンを「今の向き→求めた向き」へ回す。
- *         順序: 手を上げる → 手が着いたらモーフ0→1 → 少し止める → 手を下ろす。
+ *         順序（開ける）: 手を上げる → 鼻マスク化 0→1 → 止める → 手を下ろす → 口を開けて舌を見せる 0→1。
+ *         順序（閉じる）: 口 1→0 → 手を上げる → 鼻マスク化 1→0 → 止める → 手を下ろす（逆順）。
+ *         手順は steps の配列（raise / morph / hold / lower）を順に実行するだけ。
  *         IKは目線補正の「後」に行う（頭が動いた後の位置へ手を持っていくため）。
  *      ⑤ 目が上へ startDeg 以上向いたら、上まぶたのモーフを 0→1 へ段階的に上げる
  *         （上を向く角度 = 目の向きの「上方向成分」。頭の動きを引いた、目だけの動き）
@@ -91,15 +93,17 @@ const SETTINGS = {
   },
   maskUp: {
     hand: "R",                  // 使う手（"R" か "L"）
-    morph: "鼻マスク化",        // 手が顔に着いてから 0→1 にするモーフ
+    morph: "鼻マスク化",        // 手が顔に着いてから最初に 0→1 にするモーフ
+    mouthMorph: "口を開けて舌を見せる", // 手を下ろした「後」に 0→1 にするモーフ
     raiseSec: 0.6,              // 手を顔の前へ上げる時間
-    morphSec: 0.35,             // モーフを動かす時間
+    morphSec: 0.35,             // 鼻マスク化のモーフを動かす時間
+    mouthSec: 0.35,             // 口のモーフを動かす時間
     holdSec: 0.3,               // 動かした後に手を止める時間
     lowerSec: 0.6,              // 手を下ろす時間
     target:  { forward: 0.14, up: -0.01, side: 0.03 }, // 手首の位置（頭の座標。m。sideは手の側へ）
     fingerAim: { forward: 0.07, up: 0.04 },            // 指先が向く点（鼻のあたり）
     elbowHint: { down: 1.0, out: 0.6, back: 0.3 },     // ひじが向く方向（下・外・後ろ）
-    labels: { up: "マスクを上げる", down: "マスクを下ろす" },
+    labels: { up: "口を開ける", down: "口を閉じる" },   // ボタンの表示（押すたびに切り替わる）
     arms: {                     // 骨名の候補（three.jsは「.」を消すので両方）
       R: { shoulder: ["腕.R", "腕R"], elbow: ["ひじ.R", "ひじR"], wrist: ["手首.R", "手首R"],
            finger: ["中指１.R", "中指１R", "人指１.R", "人指１R"] },
@@ -195,15 +199,21 @@ btn.addEventListener("click", () => {
 });
 const armEntries = [];    // マスクの腕 [肩, ひじ, 手首]
 let fingerBone = null;    // 手の向きの基準（中指の付け根）
-const maskMorphs = [];    // マスクのモーフ
-const mask = { phase: "idle", t: 0, on: false, value: 0, from: 0, to: 0 };
+const maskMorphs = [];    // 鼻マスク化のモーフ
+const mouthMorphs = [];   // 口を開けて舌を見せるモーフ
+const mask = { phase: "idle", t: 0, on: false, v: { mask: 0, mouth: 0 }, steps: [], i: 0, target: 1, startV: 0 };
 const maskBtn = document.getElementById("maskBtn");
 maskBtn.addEventListener("click", () => {
   if (mask.phase !== "idle") return;
-  mask.on = !mask.on;                    // 押すたびに「上げる」⇔「下ろす」
-  mask.from = mask.value;
-  mask.to = mask.on ? 1 : 0;
-  mask.phase = "raise"; mask.t = 0;
+  mask.on = !mask.on;                    // 押すたびに「開ける」⇔「閉じる」
+  mask.target = mask.on ? 1 : 0;
+  // 手順（arm: その間 手を顔の前に置くか）。閉じるときは開けるときの逆順
+  mask.steps = mask.on
+    ? [{ type: "raise" }, { type: "morph", key: "mask", arm: true }, { type: "hold" },
+       { type: "lower" }, { type: "morph", key: "mouth", arm: false }]
+    : [{ type: "morph", key: "mouth", arm: false }, { type: "raise" },
+       { type: "morph", key: "mask", arm: true }, { type: "hold" }, { type: "lower" }];
+  mask.i = 0; mask.phase = "run"; beginMaskStep();
   maskBtn.disabled = true;
   const L = SETTINGS.maskUp.labels;
   maskBtn.textContent = mask.on ? L.down : L.up;
@@ -331,6 +341,7 @@ new GLTFLoader().load(SETTINGS.model, gltf => {
   collectMorph(G.eyelid.morph, morphs);
   collectMorph(SETTINGS.blink.morph, blinkMorphs);
   collectMorph(SETTINGS.maskUp.morph, maskMorphs);
+  collectMorph(SETTINGS.maskUp.mouthMorph, mouthMorphs);
 
   // カメラを頭の正面に置く
   const box = new THREE.Box3().setFromObject(model);
@@ -375,25 +386,31 @@ const headQ = new THREE.Quaternion();
 
 // ---- マスクを上げる ----
 const smooth01 = x => { x = THREE.MathUtils.clamp(x, 0, 1); return x * x * (3 - 2 * x); };
-// 手の上げ具合 w(0〜1) を返しつつ、モーフの値 mask.value も進める
+// 手順の最初（各ステップ開始時の準備）
+function beginMaskStep() {
+  mask.t = 0;
+  const st = mask.steps[mask.i];
+  if (st.type === "morph") mask.startV = mask.v[st.key];
+}
+// 手の上げ具合 w(0〜1) を返しつつ、手順を進めてモーフの値 mask.v も動かす
 function updateMask(dt) {
-  const M = SETTINGS.maskUp;
   if (mask.phase === "idle") return 0;
+  const M = SETTINGS.maskUp, st = mask.steps[mask.i];
   mask.t += dt;
-  let w = 0;
-  if (mask.phase === "raise") {
-    w = mask.t / M.raiseSec;
-    if (mask.t >= M.raiseSec) { mask.phase = "morph"; mask.t = 0; w = 1; }
-  } else if (mask.phase === "morph") {
-    w = 1;
-    mask.value = mask.from + (mask.to - mask.from) * smooth01(mask.t / M.morphSec);
-    if (mask.t >= M.morphSec) { mask.value = mask.to; mask.phase = "hold"; mask.t = 0; }
-  } else if (mask.phase === "hold") {
-    w = 1;
-    if (mask.t >= M.holdSec) { mask.phase = "lower"; mask.t = 0; }
-  } else if (mask.phase === "lower") {
-    w = 1 - mask.t / M.lowerSec;
-    if (mask.t >= M.lowerSec) { mask.phase = "idle"; mask.t = 0; w = 0; maskBtn.disabled = false; }
+  let w = 0, dur;
+  if (st.type === "raise") { dur = M.raiseSec; w = mask.t / dur; }
+  else if (st.type === "hold") { dur = M.holdSec; w = 1; }
+  else if (st.type === "lower") { dur = M.lowerSec; w = 1 - mask.t / dur; }
+  else {                                                   // morph
+    dur = st.key === "mask" ? M.morphSec : M.mouthSec;
+    w = st.arm ? 1 : 0;
+    mask.v[st.key] = mask.startV + (mask.target - mask.startV) * smooth01(mask.t / dur);
+  }
+  if (mask.t >= dur) {                                     // このステップ終了
+    if (st.type === "morph") mask.v[st.key] = mask.target;
+    mask.i++;
+    if (mask.i >= mask.steps.length) { mask.phase = "idle"; maskBtn.disabled = false; return 0; }
+    beginMaskStep();
   }
   return THREE.MathUtils.clamp(w, 0, 1);
 }
@@ -573,6 +590,7 @@ renderer.setAnimationLoop(() => {
   morphs.forEach(m => { m.mesh.morphTargetInfluences[m.i] = m.saved; });
   blinkMorphs.forEach(m => { m.mesh.morphTargetInfluences[m.i] = m.saved; });
   maskMorphs.forEach(m => { m.mesh.morphTargetInfluences[m.i] = m.saved; });
+  mouthMorphs.forEach(m => { m.mesh.morphTargetInfluences[m.i] = m.saved; });
   if (crouch.action) {                                          // ⑥ しゃがみの時間を進める
     const A = SETTINGS.actions.crouch;
     if (crouch.dir !== 0) {
@@ -592,6 +610,7 @@ renderer.setAnimationLoop(() => {
   morphs.forEach(m => { m.saved = m.mesh.morphTargetInfluences[m.i]; });
   blinkMorphs.forEach(m => { m.saved = m.mesh.morphTargetInfluences[m.i]; });
   maskMorphs.forEach(m => { m.saved = m.mesh.morphTargetInfluences[m.i]; });
+  mouthMorphs.forEach(m => { m.saved = m.mesh.morphTargetInfluences[m.i]; });
   applyGaze(dt, now);                                           // ④ 目線補正＋まぶた計算
   applyMaskArm(updateMask(dt));                                 // ⑨ マスクを上げる腕（目線の後）
   morphs.forEach(m => {                                         // ⑤ まぶたのモーフを適用
@@ -601,8 +620,11 @@ renderer.setAnimationLoop(() => {
   blinkMorphs.forEach(m => {
     m.mesh.morphTargetInfluences[m.i] = Math.min(1, m.saved + blinkValue);
   });
-  maskMorphs.forEach(m => {                                     // マスクのモーフ（手が着いた後に0→1）
-    m.mesh.morphTargetInfluences[m.i] = Math.min(1, m.saved + mask.value);
+  maskMorphs.forEach(m => {                                     // 鼻マスク化（手が着いた後に0→1）
+    m.mesh.morphTargetInfluences[m.i] = Math.min(1, m.saved + mask.v.mask);
+  });
+  mouthMorphs.forEach(m => {                                    // 口を開けて舌を見せる（鼻マスク化の後に0→1）
+    m.mesh.morphTargetInfluences[m.i] = Math.min(1, m.saved + mask.v.mouth);
   });
   renderer.render(scene, camera);
 
@@ -631,6 +653,7 @@ function buildSpecText() {
     "\n再生中の待機アニメ: " + info.clip +
     "\nマスクの腕: " + (armEntries.map(e => e.bone.name).join(", ") || "見つからない") +
     "\nマスクのモーフ: " + (maskMorphs.length ? SETTINGS.maskUp.morph : "見つからない") +
+    "\n口のモーフ: " + (mouthMorphs.length ? SETTINGS.maskUp.mouthMorph : "見つからない") +
     "\n呼吸の骨: " + (breathBones.map(b => b.e.bone.name).join(", ") || "見つからない") +
     "\n瞬きのモーフ: " + (blinkMorphs.length ? SETTINGS.blink.morph + "（" + blinkMorphs.length + "メッシュ）" : "見つからない") +
     "\nまぶたのモーフ: " + (morphs.length ? G.eyelid.morph + "（" + morphs.length + "メッシュ）" : "見つからない") +
